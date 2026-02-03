@@ -82,7 +82,7 @@ with col1:
     default_start = today - timedelta(days=120)
     start_date_val = st.date_input("开始日期", value=default_start)
 with col2:
-    end_date_val = st.date_input("结束日期", value=today - timedelta(days=1))
+    end_date_val = st.date_input("结束日期", value=today)
 
 force_sync = st.checkbox("强制全量同步", value=False, 
                         help="清空现有数据，重新同步所有数据")
@@ -208,11 +208,21 @@ quick_cols = st.columns(3)
 
 with quick_cols[0]:
     if st.button("🔄 增量同步 (今日)", use_container_width=True):
-        with st.spinner("同步中..."):
-            success = sync_service.sync_all_stocks(days=3)
-            if success:
-                st.success("✅ 同步完成")
-                st.rerun()
+        status_container = st.empty()
+        p_bar = st.progress(0)
+        
+        def quick_progress(curr, total, date, msg):
+            p_bar.progress(curr/total if total > 0 else 0)
+            status_container.info(f"正在同步 {date}: {msg}")
+
+        success = sync_service.sync_all_stocks(days=3, progress_callback=quick_progress)
+        if success:
+            status_container.success("✅ 增量同步完成")
+            p_bar.empty()
+            time.sleep(1)
+            st.rerun()
+        else:
+            status_container.error("❌ 同步中断")
 
 with quick_cols[1]:
     if st.button("📊 查看数据库", use_container_width=True):

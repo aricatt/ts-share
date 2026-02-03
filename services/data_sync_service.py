@@ -527,7 +527,7 @@ class DataSyncService:
             # 计算日期范围
             today = datetime.now()
             if not end_date:
-                end_date = (today - timedelta(days=1)).strftime("%Y%m%d")
+                end_date = today.strftime("%Y%m%d")
             if not start_date:
                 start_date = (today - timedelta(days=days)).strftime("%Y%m%d")
             

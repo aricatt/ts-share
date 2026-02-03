@@ -112,7 +112,7 @@ class StockService:
         # 从本地数据库查询
         if self._db_exists():
             sql = '''
-                SELECT d.*, b.名称, b.行业
+                SELECT b.名称, d.*, b.行业
                 FROM daily_data d
                 LEFT JOIN stock_basic b ON d.代码 = b.代码
                 WHERE d.日期 = ? AND d.涨跌幅 >= 9.5
@@ -161,7 +161,7 @@ class StockService:
         # 1. 从本地数据库获取
         if self._db_exists():
             sql = '''
-                SELECT d.*, b.名称, b.行业, b.地区, b.上市日期
+                SELECT b.名称, d.*, b.行业, b.地区, b.上市日期
                 FROM daily_data d
                 LEFT JOIN stock_basic b ON d.代码 = b.代码
                 WHERE d.代码 = ? 
@@ -320,7 +320,7 @@ class StockService:
         
         where_clause = ' AND '.join(conditions) if conditions else '1=1'
         sql = f'''
-            SELECT d.*, b.名称, b.行业, b.地区
+            SELECT b.名称, d.*, b.行业, b.地区
             FROM daily_data d
             LEFT JOIN stock_basic b ON d.代码 = b.代码
             WHERE {where_clause.replace('日期', 'd.日期').replace('涨跌幅', 'd.涨跌幅').replace('PE', 'd.PE').replace('流通市值', 'd.流通市值').replace('换手率', 'd.换手率')}
@@ -402,7 +402,7 @@ class StockService:
         
         # 2. 获取目标日期的完整指标
         sql_data = f'''
-            SELECT d.*, b.名称, b.行业, b.地区
+            SELECT b.名称, d.*, b.行业, b.地区
             FROM daily_data d
             LEFT JOIN stock_basic b ON d.代码 = b.代码
             WHERE d.日期 = ? AND d.代码 IN ({codes_placeholder})

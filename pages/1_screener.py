@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from services import StockService
 from rules import get_rule, get_all_rules
-from components.charts import render_chart, create_industry_pie, create_turnover_bar, create_market_cap_bar
+from components.charts import render_chart, create_industry_pie, create_turnover_bar, create_market_cap_bar, create_kline_chart
 from components.widgets import result_stats
 
 # 页面配置
@@ -59,150 +59,119 @@ for key, config in params.items():
             key=f"param_{key}"
         )
 
+# 初始化 session_state 用于持久化筛选结果
+if 'screener_results' not in st.session_state:
+    st.session_state.screener_results = None
+
+# 定义弹窗函数
+@st.dialog("股票 K 线预览", width="large")
+def show_stock_details(code, name):
+    with st.spinner("获取历史行情中..."):
+        df_hist = stock_service.get_history(code, days=120)
+    if df_hist is not None and not df_hist.empty:
+        kline_chart = create_kline_chart(df_hist, title=name)
+        render_chart(kline_chart, height=500)
+    else:
+        st.warning("暂无历史行情数据可供预览")
+
 # 开始筛选按钮
 if st.sidebar.button("🚀 开始筛选", type="primary", use_container_width=True):
-    # 创建策略实例（使用调整后的参数）
-    rule_instance = get_rule(selected_rule)
-    for key, value in adjusted_params.items():
-        if hasattr(rule_instance, key):
-            # 特殊处理：max_market_cap 需要从亿转换为元
-            if key == 'max_market_cap':
-                value = value * 1e8
-            setattr(rule_instance, key, value)
-    
-    # 显示数据源信息
-    data_source = rule_instance.data_source
-    if data_source == "zt_pool":
-        st.info(f"📊 数据源：涨停股池 ({date_str})")
-    elif data_source == "historical_zt":
-        st.info("📊 数据源：历史涨停股池（过去90天曾涨停的股票）")
-    else:
-        st.info("📊 数据源：全A股实时行情")
-    
-    with st.spinner("正在获取数据..."):
+    with st.spinner("正在筛选股票..."):
         try:
-            # 根据策略的数据源类型获取数据
-            df = stock_service.get_data_by_source(data_source, date_str)
+            # 创建策略实例
+            rule_instance = get_rule(selected_rule)
+            for key, value in adjusted_params.items():
+                if hasattr(rule_instance, key):
+                    if key == 'max_market_cap': value = value * 1e8
+                    setattr(rule_instance, key, value)
             
+            # 获取数据并应用策略
+            df = stock_service.get_data_by_source(rule_instance.data_source, date_str)
             if df.empty:
-                st.warning(f"⚠️ 无法获取数据（可能是非交易日或网络问题）")
+                st.warning("⚠️ 无法获取初始数据")
             else:
                 total_before = len(df)
-                
-                # 应用策略
                 if rule_instance.requires_history:
-                    # 需要历史数据的策略
                     result = rule_instance.apply(df, history_provider=stock_service, date_str=date_str)
                 else:
                     result = rule_instance.apply(df, date_str=date_str)
                 
-                # 显示统计
-                st.markdown("---")
-                result_stats(result, total_before)
-                
-                # ========== 步骤跟踪 ==========
-                st.markdown("---")
-                st.subheader("🔍 执行步骤跟踪")
-                
-                tracker = rule_instance.get_tracker()
-                if tracker.steps:
-                    # 显示步骤表格
-                    step_df = tracker.to_dataframe()
-                    
-                    # 添加颜色标记
-                    def highlight_filtered(row):
-                        if row['过滤数'] > 0:
-                            return ['background-color: #ffebee'] * len(row)
-                        return ['background-color: #e8f5e9'] * len(row)
-                    
-                    st.dataframe(
-                        step_df.style.apply(highlight_filtered, axis=1),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                    
-                    # 显示文字摘要
-                    with st.expander("📋 详细执行日志"):
-                        st.code(tracker.get_summary())
-                else:
-                    st.info("该策略未提供步骤跟踪信息")
-                # ========== 步骤跟踪结束 ==========
-                
-                st.markdown("---")
-                
-                if not result.empty:
-                    # 数据表格
-                    st.subheader("📋 筛选结果")
-                    
-                    # 根据数据源选择显示列（不同数据源列名可能不同）
-                    available_cols = result.columns.tolist()
-                    
-                    # 通用显示列
-                    display_cols = []
-                    col_mapping = {
-                        '代码': '代码',
-                        '名称': '名称', 
-                        '涨跌幅': '涨跌幅',
-                        '换手率': '换手率',
-                        '总市值': '总市值',
-                    }
-                    
-                    # 涨停股池特有列
-                    if '连板数' in available_cols:
-                        col_mapping['连板数'] = '连板数'
-                    if '所属行业' in available_cols:
-                        col_mapping['所属行业'] = '所属行业'
-                    
-                    # 筛选存在的列
-                    for col in col_mapping.keys():
-                        if col in available_cols:
-                            display_cols.append(col)
-                    
-                    display_df = result[display_cols].copy()
-                    
-                    # 格式化列
-                    if '总市值' in display_df.columns:
-                        display_df['总市值(亿)'] = (display_df['总市值'] / 10000).round(2)
-                        display_df = display_df.drop('总市值', axis=1)
-                    if '涨跌幅' in display_df.columns:
-                        display_df['涨跌幅'] = display_df['涨跌幅'].round(2).astype(str) + '%'
-                    if '换手率' in display_df.columns:
-                        display_df['换手率'] = display_df['换手率'].round(2).astype(str) + '%'
-                    
-                    st.dataframe(display_df, use_container_width=True, hide_index=True)
-                    
-                    # 图表分析
-                    st.markdown("---")
-                    st.subheader("📊 数据可视化")
-                    
-                    # 仅在有相应数据时显示图表
-                    if '所属行业' in available_cols:
-                        chart_col1, chart_col2 = st.columns(2)
-                        
-                        with chart_col1:
-                            st.markdown("#### 🥧 行业分布")
-                            render_chart(create_industry_pie(result), height=450)
-                        
-                        with chart_col2:
-                            st.markdown("#### 📊 换手率 TOP 10")
-                            render_chart(create_turnover_bar(result), height=450)
-                        
-                        st.markdown("#### 💰 市值分布（最小 10 只）")
-                        render_chart(create_market_cap_bar(result), height=400)
-                    else:
-                        st.markdown("#### 📊 换手率 TOP 10")
-                        render_chart(create_turnover_bar(result), height=450)
-                        
-                        st.markdown("#### 💰 市值分布（最小 10 只）")
-                        render_chart(create_market_cap_bar(result), height=400)
-                    
-                else:
-                    st.info("❌ 没有符合条件的股票")
-                    
+                # 保存到 session_state
+                st.session_state.screener_results = {
+                    "result": result,
+                    "total_before": total_before,
+                    "date_str": date_str,
+                    "rule_name": selected_rule,
+                    "tracker_df": rule_instance.get_tracker().to_dataframe(),
+                    "tracker_summary": rule_instance.get_tracker().get_summary()
+                }
         except Exception as e:
             st.error(f"❌ 筛选失败: {str(e)}")
             import traceback
             st.code(traceback.format_exc())
+
+# 渲染筛选结果 (如果 session_state 中有数据)
+if st.session_state.screener_results:
+    res_data = st.session_state.screener_results
+    result = res_data["result"]
+    
+    st.info(f"📊 策略：{res_data['rule_name']} | 日期：{res_data['date_str']}")
+    result_stats(result, res_data["total_before"])
+    
+    # 步骤跟踪
+    with st.expander("🔍 查看执行步骤跟踪", expanded=False):
+        st.dataframe(res_data["tracker_df"], use_container_width=True, hide_index=True)
+        st.code(res_data["tracker_summary"])
+
+    st.markdown("---")
+    if not result.empty:
+        st.subheader("📋 筛选结果")
+        
+        # 准备显示数据
+        display_df = result.copy()
+        if '总市值' in display_df.columns:
+            display_df['总市值(亿)'] = (display_df['总市值'] / 10000).round(2)
+        
+        # 统一格式化
+        for col in ['涨跌幅', '换手率']:
+            if col in display_df.columns:
+                display_df[col] = display_df[col].round(2).astype(str) + '%'
+        
+        # 定义显示列
+        view_cols = [c for c in ['代码', '名称', '涨跌幅', '换手率', '总市值(亿)', '所属行业', '连板数'] if c in display_df.columns]
+        display_view = display_df[view_cols]
+
+        st.caption("💡 提示：点击下方表格任意行，可弹出 120 日 K 线预览。")
+        
+        # 数据展示与交互
+        selected = st.dataframe(
+            display_view,
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="screener_result_table"
+        )
+
+        # 触发弹窗逻辑
+        if selected and "rows" in selected.selection and len(selected.selection.rows) > 0:
+            row_idx = selected.selection.rows[0]
+            sel_row = display_view.iloc[row_idx]
+            show_stock_details(sel_row['代码'], sel_row['名称'])
+
+        # 图表分析
+        st.markdown("---")
+        st.subheader("📊 数据可视化")
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            if '所属行业' in result.columns:
+                st.markdown("#### 🥧 行业分布")
+                render_chart(create_industry_pie(result), height=400)
+        with chart_col2:
+            st.markdown("#### 📊 换手率 TOP 10")
+            render_chart(create_turnover_bar(result), height=400)
+    else:
+        st.warning("😵 选股完成，但没有股票符合条件")
 
 # 使用说明
 st.sidebar.markdown("---")

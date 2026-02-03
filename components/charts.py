@@ -140,8 +140,8 @@ def create_kline_chart(df: pd.DataFrame, title: str = "K线图") -> Grid:
             xaxis_opts=opts.AxisOpts(is_scale=True),
             yaxis_opts=opts.AxisOpts(is_scale=True),
             datazoom_opts=[
-                opts.DataZoomOpts(is_show=True, type_="inside", xaxis_index=[0, 1]),
-                opts.DataZoomOpts(is_show=True, type_="slider", xaxis_index=[0, 1], pos_top="90%"),
+                opts.DataZoomOpts(is_show=True, type_="inside", xaxis_index=[0, 1], range_start=0, range_end=100),
+                opts.DataZoomOpts(is_show=True, type_="slider", xaxis_index=[0, 1], range_start=0, range_end=100, pos_bottom="10%"),
             ],
             legend_opts=opts.LegendOpts(pos_top="5%"),
             tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
@@ -169,8 +169,17 @@ def create_kline_chart(df: pd.DataFrame, title: str = "K线图") -> Grid:
     bar = (
         Bar()
         .add_xaxis(dates)
-        .add_yaxis("成交量", volumes, itemstyle_opts=opts.ItemStyleOpts(color="#7fbe9e", opacity=0.5))
-        .set_global_opts(legend_opts=opts.LegendOpts(is_show=False))
+        .add_yaxis("成交量", volumes, 
+                  itemstyle_opts=opts.ItemStyleOpts(color="#7fbe9e", opacity=0.5),
+                  label_opts=opts.LabelOpts(is_show=False))
+        .set_global_opts(
+            legend_opts=opts.LegendOpts(is_show=False),
+            yaxis_opts=opts.AxisOpts(
+                axislabel_opts=opts.LabelOpts(is_show=False), # 隐藏 Y 轴标签
+                axistick_opts=opts.AxisTickOpts(is_show=False), # 隐藏刻度
+                splitline_opts=opts.SplitLineOpts(is_show=False) # 隐藏横向网格线线
+            )
+        )
     )
     
     # 均量线
@@ -187,9 +196,9 @@ def create_kline_chart(df: pd.DataFrame, title: str = "K线图") -> Grid:
     bar.overlap(line_v)
     
     grid = (
-        Grid(init_opts=opts.InitOpts(theme=ThemeType.DARK, width="100%", height="600px"))
-        .add(kline, grid_opts=opts.GridOpts(pos_left="10%", pos_right="8%", height="55%"))
-        .add(bar, grid_opts=opts.GridOpts(pos_left="10%", pos_right="8%", pos_top="70%", height="20%"))
+        Grid(init_opts=opts.InitOpts(theme=ThemeType.DARK, width="100%", height="550px"))
+        .add(kline, grid_opts=opts.GridOpts(pos_left="8%", pos_right="5%", pos_top="8%", height="55%"))
+        .add(bar, grid_opts=opts.GridOpts(pos_left="8%", pos_right="5%", pos_top="70%", height="15%"))
     )
     
     return grid
