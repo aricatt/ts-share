@@ -126,6 +126,7 @@ def create_kline_chart(df: pd.DataFrame, title: str = "K线图") -> Grid:
     kline_data = df[['开盘', '收盘', '最低', '最高']].values.tolist()
     volumes = df['成交量'].tolist()
     
+    # K线主图
     kline = (
         Kline()
         .add_xaxis(dates)
@@ -140,21 +141,55 @@ def create_kline_chart(df: pd.DataFrame, title: str = "K线图") -> Grid:
             yaxis_opts=opts.AxisOpts(is_scale=True),
             datazoom_opts=[
                 opts.DataZoomOpts(is_show=True, type_="inside", xaxis_index=[0, 1]),
+                opts.DataZoomOpts(is_show=True, type_="slider", xaxis_index=[0, 1], pos_top="90%"),
             ],
+            legend_opts=opts.LegendOpts(pos_top="5%"),
+            tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
         )
     )
     
+    # 均线
+    line = (
+        Line()
+        .add_xaxis(dates)
+        .add_yaxis("MA5", df['ma5'].tolist() if 'ma5' in df.columns else [], is_smooth=True, 
+                  linestyle_opts=opts.LineStyleOpts(color="#5470c6", opacity=0.8, width=1), 
+                  label_opts=opts.LabelOpts(is_show=False))
+        .add_yaxis("MA20", df['ma20'].tolist() if 'ma20' in df.columns else [], is_smooth=True,
+                  linestyle_opts=opts.LineStyleOpts(color="#ee6666", opacity=0.8, width=1), 
+                  label_opts=opts.LabelOpts(is_show=False))
+        .add_yaxis("MA60", df['ma60'].tolist() if 'ma60' in df.columns else [], is_smooth=True,
+                  linestyle_opts=opts.LineStyleOpts(color="#91cc75", opacity=0.8, width=1), 
+                  label_opts=opts.LabelOpts(is_show=False))
+    )
+    
+    kline.overlap(line)
+    
+    # 成交量柱状图
     bar = (
         Bar()
         .add_xaxis(dates)
-        .add_yaxis("成交量", volumes, itemstyle_opts=opts.ItemStyleOpts(color="#7fbe9e"))
+        .add_yaxis("成交量", volumes, itemstyle_opts=opts.ItemStyleOpts(color="#7fbe9e", opacity=0.5))
         .set_global_opts(legend_opts=opts.LegendOpts(is_show=False))
     )
     
+    # 均量线
+    line_v = (
+        Line()
+        .add_xaxis(dates)
+        .add_yaxis("VMA5", df['vma5'].tolist() if 'vma5' in df.columns else [], is_smooth=True,
+                  linestyle_opts=opts.LineStyleOpts(color="#5470c6", width=1), label_opts=opts.LabelOpts(is_show=False))
+        .add_yaxis("VMA10", df['vma10'].tolist() if 'vma10' in df.columns else [], is_smooth=True,
+                  linestyle_opts=opts.LineStyleOpts(color="#fac858", width=1), label_opts=opts.LabelOpts(is_show=False))
+        .add_yaxis("VMA20", df['vma20'].tolist() if 'vma20' in df.columns else [], is_smooth=True,
+                  linestyle_opts=opts.LineStyleOpts(color="#ee6666", width=1), label_opts=opts.LabelOpts(is_show=False))
+    )
+    bar.overlap(line_v)
+    
     grid = (
-        Grid(init_opts=opts.InitOpts(theme=ThemeType.DARK, width="100%", height="500px"))
-        .add(kline, grid_opts=opts.GridOpts(pos_left="10%", pos_right="8%", height="50%"))
-        .add(bar, grid_opts=opts.GridOpts(pos_left="10%", pos_right="8%", pos_top="65%", height="20%"))
+        Grid(init_opts=opts.InitOpts(theme=ThemeType.DARK, width="100%", height="600px"))
+        .add(kline, grid_opts=opts.GridOpts(pos_left="10%", pos_right="8%", height="55%"))
+        .add(bar, grid_opts=opts.GridOpts(pos_left="10%", pos_right="8%", pos_top="70%", height="20%"))
     )
     
     return grid

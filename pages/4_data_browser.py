@@ -93,12 +93,20 @@ if view_mode == "全市场快照":
                 params.append(max_market_cap * 10000) # 亿 -> 万
                 
         where_clause = " AND ".join(conditions)
-        sql = f"SELECT * FROM daily_data WHERE {where_clause} ORDER BY 涨跌幅 DESC"
+        sql = f"""
+            SELECT d.*, b.名称 
+            FROM daily_data d
+            LEFT JOIN stock_basic b ON d.代码 = b.代码
+            WHERE {where_clause.replace('日期', 'd.日期').replace('代码', 'd.代码').replace('涨跌幅', 'd.涨跌幅').replace('PE', 'd.PE').replace('流通市值', 'd.流通市值')}
+            ORDER BY d.涨跌幅 DESC
+        """
         return sync_service.query(sql, tuple(params))
 
     # 执行查询
     with st.spinner("查询中..."):
         df = fetch_market_data()
+        if not df.empty:
+            df = df.loc[:, ~df.columns.duplicated()]
 
     if df.empty:
         st.info(f"🧐 未找到匹配 '{selected_date}' 的数据。")
@@ -119,7 +127,7 @@ if view_mode == "全市场快照":
         if '流通市值' in page_df.columns:
             page_df['流通市值(亿)'] = (page_df['流通市值'] / 10000).round(2)
             
-        display_cols = ['日期', '代码', '收盘', '涨跌幅', '换手率', 'PE', 'PE_TTM', 'PB', '流通市值(亿)', '成交额']
+        display_cols = ['日期', '代码', '名称', '收盘', '涨跌幅', '换手率', 'PE', 'PE_TTM', 'PB', '流通市值(亿)', '成交额']
         available_cols = [c for c in display_cols if c in page_df.columns]
         
         st.dataframe(
@@ -127,6 +135,8 @@ if view_mode == "全市场快照":
             use_container_width=True,
             hide_index=True,
             column_config={
+                "代码": st.column_config.TextColumn("代码"),
+                "名称": st.column_config.TextColumn("名称"),
                 "涨跌幅": st.column_config.NumberColumn("涨跌幅", format="%.2f%%"),
                 "换手率": st.column_config.NumberColumn("换手率", format="%.2f%%"),
                 "流通市值(亿)": st.column_config.NumberColumn("流通市值(亿)", format="%.2f 亿"),
@@ -147,30 +157,48 @@ else:
     # 最近 N 天
     history_days = st.sidebar.slider("查看天数", min_value=5, max_value=365, value=60)
     
+    # 复权选项
+    adj_type = st.sidebar.selectbox("复权方式", options=["前复权", "未复权"])
+    
     # 查询
     with st.spinner(f"正在获取 {search_code} 的历史数据..."):
         df_history = stock_service.get_history(search_code, days=history_days)
+        # 移除重复列名
+        if df_history is not None and not df_history.empty:
+            df_history = df_history.loc[:, ~df_history.columns.duplicated()]
         
     if df_history is None or df_history.empty:
         st.warning(f"⚠️ 数据库中未找到代码为 '{search_code}' 的历史数据。")
         st.info("💡 请确保已在设置中同步了该股票所属的时间范围。")
     else:
-        st.subheader(f"📈 {search_code} 历史行情与 K 线图")
+        # 准备图表数据
+        df_plot = df_history.copy()
+        if adj_type == "前复权" and "qfq_收盘" in df_plot.columns and df_plot["qfq_收盘"].notnull().any():
+            df_plot["开盘"] = df_plot["qfq_开盘"]
+            df_plot["最高"] = df_plot["qfq_最高"]
+            df_plot["最低"] = df_plot["qfq_最低"]
+            df_plot["收盘"] = df_plot["qfq_收盘"]
+            chart_title = f"{search_code} {adj_type} K 线"
+        else:
+            chart_title = f"{search_code} 未复权 K 线"
+
+        st.subheader(f"📈 {search_code} 历史行情与 K 线图 ({adj_type})")
         
         # 统计指标
         latest = df_history.iloc[-1]
-        cols = st.columns(4)
+        cols = st.columns(5)
         cols[0].metric("最新收盘", f"{latest['收盘']:.2f}")
         cols[1].metric("涨跌幅", f"{latest['涨跌幅']:.2f}%")
-        cols[2].metric("最新换手", f"{latest['换手率']:.2f}%")
-        cols[3].metric("PE(动)", f"{latest['PE']:.2f}" if pd.notnull(latest['PE']) else "N/A")
+        cols[2].metric("MA5", f"{latest['ma5']:.2f}" if 'ma5' in latest and pd.notnull(latest['ma5']) else "N/A")
+        cols[3].metric("最新成交", f"{int(latest['成交量']):,}")
+        cols[4].metric("VMA5", f"{int(latest['vma5']):,}" if 'vma5' in latest and pd.notnull(latest['vma5']) else "N/A")
         
         st.markdown("---")
         
         # K 线图
         with st.container():
-            kline_chart = create_kline_chart(df_history, title=f"{search_code} 近 {len(df_history)} 交易日 K 线")
-            render_chart(kline_chart, height=550)
+            kline_chart = create_kline_chart(df_plot, title=chart_title)
+            render_chart(kline_chart, height=650)
             
         st.markdown("---")
         
@@ -181,7 +209,7 @@ else:
         if '流通市值' in page_df.columns:
             page_df['流通市值(亿)'] = (page_df['流通市值'] / 10000).round(2)
             
-        display_cols = ['日期', '开盘', '最高', '最低', '收盘', '涨跌幅', '换手率', 'PE', '流通市值(亿)', '成交额']
+        display_cols = ['日期', '代码', '名称', '开盘', '最高', '最低', '收盘', '涨跌幅', '换手率', 'PE', '流通市值(亿)', '成交额']
         available_cols = [c for c in display_cols if c in page_df.columns]
         
         st.dataframe(
@@ -189,6 +217,8 @@ else:
             use_container_width=True,
             hide_index=True,
             column_config={
+                "代码": st.column_config.TextColumn("代码"),
+                "名称": st.column_config.TextColumn("名称"),
                 "涨跌幅": st.column_config.NumberColumn("涨跌幅", format="%.2f%%"),
                 "换手率": st.column_config.NumberColumn("换手率", format="%.2f%%"),
                 "流通市值(亿)": st.column_config.NumberColumn("流通市值(亿)", format="%.2f 亿"),

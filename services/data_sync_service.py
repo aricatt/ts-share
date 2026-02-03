@@ -63,10 +63,12 @@ class DataSyncService:
     def _init_database(self):
         """初始化数据库表结构"""
         with sqlite3.connect(self.db_path) as conn:
+            # 1. 日线数据表
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS daily_data (
                     日期 TEXT NOT NULL,
                     代码 TEXT NOT NULL,
+                    名称 TEXT,
                     开盘 REAL,
                     最高 REAL,
                     最低 REAL,
@@ -85,7 +87,32 @@ class DataSyncService:
                     流通市值 REAL,
                     总股本 REAL,
                     流通股本 REAL,
+                    复权因子 REAL,
+                    qfq_开盘 REAL,
+                    qfq_最高 REAL,
+                    qfq_最低 REAL,
+                    qfq_收盘 REAL,
+                    ma5 REAL,
+                    ma10 REAL,
+                    ma20 REAL,
+                    vma5 REAL,
+                    vma10 REAL,
+                    vma20 REAL,
                     PRIMARY KEY (日期, 代码)
+                )
+            ''')
+            
+            # 2. 股票基础信息表
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS stock_basic (
+                    代码 TEXT PRIMARY KEY,
+                    名称 TEXT,
+                    地区 TEXT,
+                    行业 TEXT,
+                    市场 TEXT,
+                    上市日期 TEXT,
+                    退市日期 TEXT,
+                    状态 TEXT
                 )
             ''')
             
@@ -93,8 +120,35 @@ class DataSyncService:
             conn.execute('CREATE INDEX IF NOT EXISTS idx_code ON daily_data(代码)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_date ON daily_data(日期)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_pct_chg ON daily_data(涨跌幅)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_pe ON daily_data(PE)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_market_cap ON daily_data(流通市值)')
+            
+            # 动态检查并添加缺失的列（适配已有数据库升级）
+            cursor = conn.execute("PRAGMA table_info(daily_data)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            
+            # 需要存在的列
+            target_cols = {
+                '名称': 'TEXT',
+                '复权因子': 'REAL',
+                'qfq_开盘': 'REAL',
+                'qfq_最高': 'REAL',
+                'qfq_最低': 'REAL',
+                'qfq_收盘': 'REAL',
+                'ma5': 'REAL',
+                'ma10': 'REAL',
+                'ma20': 'REAL',
+                'ma60': 'REAL',
+                'vma5': 'REAL',
+                'vma10': 'REAL',
+                'vma20': 'REAL'
+            }
+            
+            for col, col_type in target_cols.items():
+                if col not in existing_cols:
+                    print(f"🔧 正在升级数据库：添加列 {col}...")
+                    try:
+                        conn.execute(f"ALTER TABLE daily_data ADD COLUMN {col} {col_type}")
+                    except Exception as e:
+                        print(f"⚠️ 添加列 {col} 失败: {e}")
             
             conn.commit()
     
@@ -175,6 +229,119 @@ class DataSyncService:
     
     # ==================== 交易日历 ====================
     
+    def recompute_technical_indicators(self):
+        """重新计算所有股票的前复权价格和均线指标"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                # 1. 加载所有行情数据
+                print("   加载数据...")
+                df = pd.read_sql_query("SELECT * FROM daily_data ORDER BY 代码, 日期", conn)
+                
+                if df.empty:
+                    return
+                
+                print(f"   计算指标 ({len(df)} 条记录)...")
+                # 确保代码顺序
+                df = df.sort_values(['代码', '日期'])
+                
+                # 计算前复权收盘价
+                # 前复权原理：P' = P * (Current_Factor / Last_Factor)
+                
+                # 获取每只股票最后一次有效的复权因子作为基准
+                # 必须先剔除 NULL 才能找到真正的“最后”一个因子
+                valid_factors = df[df['复权因子'].notnull()].groupby('代码')['复权因子'].last()
+                df['base_factor'] = df['代码'].map(valid_factors)
+                
+                # 只有当原始价格和当前复权因子都存在时才计算
+                mask = df['收盘'].notnull() & df['复权因子'].notnull() & df['base_factor'].notnull()
+                
+                # 比例系数
+                df['adj_ratio'] = 1.0
+                df.loc[mask, 'adj_ratio'] = df.loc[mask, '复权因子'] / df.loc[mask, 'base_factor']
+                
+                # 前复权 OHLC
+                df['qfq_开盘'] = (df['开盘'] * df['adj_ratio']).round(2)
+                df['qfq_最高'] = (df['最高'] * df['adj_ratio']).round(2)
+                df['qfq_最低'] = (df['最低'] * df['adj_ratio']).round(2)
+                df['qfq_收盘'] = (df['收盘'] * df['adj_ratio']).round(2)
+                
+                # 对于还是 NULL 的（比如没有复权因子的品种），使用原始价格
+                df['qfq_收盘'] = df['qfq_收盘'].fillna(df['收盘'])
+                df['qfq_开盘'] = df['qfq_开盘'].fillna(df['开盘'])
+                df['qfq_最高'] = df['qfq_最高'].fillna(df['最高'])
+                df['qfq_最低'] = df['qfq_最低'].fillna(df['最低'])
+                
+                # 计算均线 (基于前复权收盘价)
+                gp = df.groupby('代码')['qfq_收盘']
+                df['ma5'] = gp.transform(lambda x: x.rolling(5).mean()).round(2)
+                df['ma10'] = gp.transform(lambda x: x.rolling(10).mean()).round(2)
+                df['ma20'] = gp.transform(lambda x: x.rolling(20).mean()).round(2)
+                df['ma60'] = gp.transform(lambda x: x.rolling(60).mean()).round(2)
+                
+                # 计算均量
+                gv = df.groupby('代码')['成交量']
+                df['vma5'] = gv.transform(lambda x: x.rolling(5).mean()).round(0)
+                df['vma10'] = gv.transform(lambda x: x.rolling(10).mean()).round(0)
+                df['vma20'] = gv.transform(lambda x: x.rolling(20).mean()).round(0)
+                
+                # 2. 回写数据库
+                print("   保存结果...")
+                update_cols = ['qfq_开盘', 'qfq_最高', 'qfq_最低', 'qfq_收盘', 'ma5', 'ma10', 'ma20', 'ma60', 'vma5', 'vma10', 'vma20', '日期', '代码']
+                df_update = df[update_cols]
+                
+                # 使用事务批量更新
+                cursor = conn.cursor()
+                sql = '''
+                    UPDATE daily_data 
+                    SET qfq_开盘 = ?, qfq_最高 = ?, qfq_最低 = ?, qfq_收盘 = ?, 
+                        ma5 = ?, ma10 = ?, ma20 = ?, ma60 = ?, vma5 = ?, vma10 = ?, vma20 = ?
+                    WHERE 日期 = ? AND 代码 = ?
+                '''
+                data = [tuple(x) for x in df_update.values]
+                cursor.executemany(sql, data)
+                conn.commit()
+                print("✅ 技术指标计算完成")
+                
+        except Exception as e:
+            print(f"❌ 计算技术指标失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # ==================== 股票列表与基础信息 ====================
+    
+    def sync_stock_basic(self) -> bool:
+        """同步股票基础信息 (名称、行业等)"""
+        try:
+            print("正在从 Tushare 获取全市场股票基础信息...")
+            df = self.pro.stock_basic(
+                list_status='L',
+                fields='symbol,name,area,industry,market,list_date,delist_date,list_status'
+            )
+            
+            if df is None or df.empty:
+                return False
+                
+            df = df.rename(columns={
+                'symbol': '代码',
+                'name': '名称',
+                'area': '地区',
+                'industry': '行业',
+                'market': '市场',
+                'list_date': '上市日期',
+                'delist_date': '退市日期',
+                'list_status': '状态'
+            })
+            
+            with sqlite3.connect(self.db_path) as conn:
+                df.to_sql('stock_basic', conn, if_exists='replace', index=False)
+                conn.commit()
+            
+            print(f"✅ 股票基础信息同步完成，共 {len(df)} 只股票")
+            return True
+        except Exception as e:
+            print(f"❌ 同步股票基础信息失败: {e}")
+            return False
+
     def get_trading_days(self, start_date: str, end_date: str) -> List[str]:
         """获取交易日列表"""
         try:
@@ -234,19 +401,38 @@ class DataSyncService:
             return pd.DataFrame()
     
     def fetch_and_merge_by_date(self, trade_date: str) -> pd.DataFrame:
-        """按日期获取并合并 daily + daily_basic"""
-        df_daily = self.fetch_daily_by_date(trade_date)
-        if df_daily.empty:
-            return pd.DataFrame()
-        
-        df_basic = self.fetch_daily_basic_by_date(trade_date)
-        
-        if not df_basic.empty:
+        """获取并合并指定日期的所有股票行情指标"""
+        try:
+            # 1. 基础日线
+            df_daily = self.fetch_daily_by_date(trade_date)
+            # 2. 每日指标 (PE/PB等)
+            df_basic = self.fetch_daily_basic_by_date(trade_date)
+            # 3. 复权因子
+            df_adj = self.fetch_adj_factor_by_date(trade_date)
+            
+            if df_daily.empty:
+                return pd.DataFrame()
+            
+            # 合并
             df = df_daily.merge(df_basic, on=['代码', '日期'], how='left')
-        else:
-            df = df_daily
-        
-        return df
+            df = df.merge(df_adj, on=['代码', '日期'], how='left')
+            
+            return df
+        except Exception as e:
+            print(f"❌ 合并 {trade_date} 数据失败: {e}")
+            return pd.DataFrame()
+
+    def fetch_adj_factor_by_date(self, trade_date: str) -> pd.DataFrame:
+        """获取全市场复权因子"""
+        try:
+            df = self.pro.adj_factor(trade_date=trade_date)
+            if df is not None and not df.empty:
+                df = df.rename(columns={'ts_code': '代码', 'trade_date': '日期', 'adj_factor': '复权因子'})
+                df['代码'] = df['代码'].str[:6]
+                return df[['代码', '日期', '复权因子']]
+        except Exception as e:
+            print(f"⚠️ 获取 {trade_date} 复权因子失败: {e}")
+        return pd.DataFrame()
     
     # ==================== SQLite 存储 ====================
     
@@ -261,16 +447,19 @@ class DataSyncService:
             return 0
         
         # 确保列顺序和数据库一致
-        columns = ['日期', '代码', '开盘', '最高', '最低', '收盘', '昨收', 
-                   '涨跌额', '涨跌幅', '成交量', '成交额', '换手率', '量比',
-                   'PE', 'PE_TTM', 'PB', '总市值', '流通市值', '总股本', '流通股本']
+        columns = [
+            '日期', '代码', '名称', '开盘', '最高', '最低', '收盘', '昨收', 
+            '涨跌额', '涨跌幅', '成交量', '成交额', '换手率', '量比',
+            'PE', 'PE_TTM', 'PB', '总市值', '流通市值', '总股本', '流通股本',
+            '复权因子'
+        ]
         
         # 添加缺失的列
         for col in columns:
             if col not in df.columns:
                 df[col] = None
         
-        df = df[columns]
+        df_to_save = df[columns]
         
         with sqlite3.connect(self.db_path) as conn:
             # 使用 REPLACE INTO 实现 upsert
@@ -279,7 +468,7 @@ class DataSyncService:
             sql = f'REPLACE INTO daily_data ({cols_str}) VALUES ({placeholders})'
             
             # 批量插入
-            data = df.values.tolist()
+            data = df_to_save.values.tolist()
             conn.executemany(sql, data)
             conn.commit()
             
@@ -315,6 +504,8 @@ class DataSyncService:
     def sync_all_stocks(
         self, 
         days: int = 120, 
+        start_date: str = None,
+        end_date: str = None,
         progress_callback=None,
         force: bool = False
     ) -> bool:
@@ -333,12 +524,18 @@ class DataSyncService:
             return False
         
         try:
-            print(f"🚀 开始同步 {days} 天数据（SQLite 存储模式）...")
-            
             # 计算日期范围
             today = datetime.now()
-            end_date = (today - timedelta(days=1)).strftime("%Y%m%d")
-            start_date = (today - timedelta(days=days)).strftime("%Y%m%d")
+            if not end_date:
+                end_date = (today - timedelta(days=1)).strftime("%Y%m%d")
+            if not start_date:
+                start_date = (today - timedelta(days=days)).strftime("%Y%m%d")
+            
+            # 格式化日期（如果是 2024-01-01 格式转为 20240101）
+            start_date = start_date.replace("-", "").replace("/", "")
+            end_date = end_date.replace("-", "").replace("/", "")
+
+            print(f"🚀 开始同步 {start_date} ~ {end_date} 间数据（SQLite 存储模式）...")
             
             # 获取交易日列表
             trading_days = self.get_trading_days(start_date, end_date)
@@ -348,15 +545,22 @@ class DataSyncService:
             
             print(f"📅 交易日范围: {trading_days[0]} ~ {trading_days[-1]}，共 {len(trading_days)} 个交易日")
             
-            # 增量模式
+            # 增量模式：排除已经同步过且数据完整的日期
             if not force:
-                last_synced = self.get_last_synced_date()
-                if last_synced:
-                    trading_days = [d for d in trading_days if d > last_synced]
-                    if not trading_days:
-                        print("✅ 数据已是最新")
-                        return True
-                    print(f"📊 增量同步: {len(trading_days)} 个新交易日")
+                # 检查已同步的日期中，哪些是缺失‘复权因子’的
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.execute("SELECT DISTINCT 日期 FROM daily_data WHERE 复权因子 IS NOT NULL")
+                    complete_dates = {row[0] for row in cursor.fetchall()}
+                
+                trading_days = [d for d in trading_days if d not in complete_dates]
+                
+                if not trading_days:
+                    print("✅ 所选范围内的交易日已全部同步且数据完整")
+                    # 即使日期同步完了，也要检查并计算指标
+                    self.recompute_technical_indicators()
+                    return True
+                
+                print(f"📊 增量同步: 需要获取/补全 {len(trading_days)} 个交易日的数据")
             else:
                 print("⚠️ 强制同步模式，清空数据库...")
                 with sqlite3.connect(self.db_path) as conn:
@@ -372,10 +576,13 @@ class DataSyncService:
                     print("⏹️ 收到停止信号")
                     break
                 
-                # 获取数据
+                # 获取并合并数据
                 df = self.fetch_and_merge_by_date(trade_date)
                 
                 if not df.empty:
+                    # 自动更新基础信息：如果发现新股票代码
+                    self._check_for_new_stocks(df['代码'].unique())
+                    
                     # 保存到 SQLite
                     count = self.save_to_database(df)
                     total_records += count
@@ -388,6 +595,15 @@ class DataSyncService:
                 
                 # 短暂间隔
                 time.sleep(0.15)
+            
+            # 重新同步一次基础信息，确保名称最新
+            self.sync_stock_basic()
+            
+            # 计算技术指标（前复权、MA、VMA）
+            print("📈 正在计算技术指标（前复权、均线等）...")
+            if progress_callback:
+                progress_callback(len(trading_days), len(trading_days), "计算中", "计算均线指标...")
+            self.recompute_technical_indicators()
             
             # 保存元数据
             metadata = {
@@ -410,15 +626,42 @@ class DataSyncService:
         finally:
             self._release_lock()
     
+    def _check_for_new_stocks(self, current_codes: List[str]):
+        """检查是否有新股票出现，如果有则同步基础表"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT 代码 FROM stock_basic")
+                synced_codes = {row[0] for row in cursor.fetchall()}
+            
+            new_codes = set(current_codes) - synced_codes
+            if new_codes:
+                print(f"📢 发现 {len(new_codes)} 只新股票记录，更新基础信息表...")
+                self.sync_stock_basic()
+        except:
+            pass
+
     # ==================== 数据查询 ====================
     
     def get_stock_history(self, code: str, days: int = None) -> pd.DataFrame:
         """获取单只股票历史数据"""
-        sql = 'SELECT * FROM daily_data WHERE 代码 = ? ORDER BY 日期'
+        sql = '''
+            SELECT d.*, b.名称 
+            FROM daily_data d
+            LEFT JOIN stock_basic b ON d.代码 = b.代码
+            WHERE d.代码 = ? 
+            ORDER BY d.日期
+        '''
         params = [code]
         
         if days:
-            sql = 'SELECT * FROM daily_data WHERE 代码 = ? ORDER BY 日期 DESC LIMIT ?'
+            sql = f'''
+                SELECT d.*, b.名称 
+                FROM daily_data d
+                LEFT JOIN stock_basic b ON d.代码 = b.代码
+                WHERE d.代码 = ? 
+                ORDER BY d.日期 DESC 
+                LIMIT ?
+            '''
             params = [code, days]
         
         with sqlite3.connect(self.db_path) as conn:
@@ -428,10 +671,15 @@ class DataSyncService:
             df = df.sort_values('日期')
         
         return df
-    
+
     def get_daily_data(self, trade_date: str) -> pd.DataFrame:
         """获取某一天的全市场数据"""
-        sql = 'SELECT * FROM daily_data WHERE 日期 = ?'
+        sql = '''
+            SELECT d.*, b.名称 
+            FROM daily_data d
+            LEFT JOIN stock_basic b ON d.代码 = b.代码
+            WHERE d.日期 = ?
+        '''
         with sqlite3.connect(self.db_path) as conn:
             return pd.read_sql_query(sql, conn, params=[trade_date])
     

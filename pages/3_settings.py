@@ -4,7 +4,7 @@
 import streamlit as st
 import os
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import sys
 sys.path.insert(0, '.')
@@ -63,12 +63,29 @@ st.markdown("---")
 st.subheader("📥 数据同步")
 st.markdown("从 Tushare Pro 同步 A 股历史数据到本地 SQLite 数据库")
 
+# 股票基础信息同步
+sync_basic_col1, sync_basic_col2 = st.columns([1, 1])
+with sync_basic_col1:
+    if st.button("📋 同步股票基础信息", help="同步股票代码与名称的对应关系（仅需偶尔同步一次）"):
+        with st.spinner("同步中..."):
+            if sync_service.sync_stock_basic():
+                st.success("✅ 股票基础信息同步成功")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.error("❌ 同步失败")
+
+st.markdown("---")
 col1, col2 = st.columns(2)
 with col1:
-    days = st.slider("同步天数", min_value=30, max_value=365, value=120, step=30)
+    today = datetime.now()
+    default_start = today - timedelta(days=120)
+    start_date_val = st.date_input("开始日期", value=default_start)
 with col2:
-    force_sync = st.checkbox("强制全量同步", value=False, 
-                            help="清空现有数据，重新同步所有数据")
+    end_date_val = st.date_input("结束日期", value=today - timedelta(days=1))
+
+force_sync = st.checkbox("强制全量同步", value=False, 
+                        help="清空现有数据，重新同步所有数据")
 
 st.caption("💡 采用「按日期批量获取」策略，120天数据约 2 分钟即可完成")
 
@@ -168,7 +185,8 @@ else:
         stage_container.info("🔄 正在初始化...")
         
         success = sync_service.sync_all_stocks(
-            days=days,
+            start_date=start_date_val.strftime("%Y%m%d"),
+            end_date=end_date_val.strftime("%Y%m%d"),
             progress_callback=update_progress,
             force=force_sync
         )
