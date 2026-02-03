@@ -1,437 +1,540 @@
 """
 本地数据同步服务
-负责拉取和管理A股历史数据（按股票代码分区存储）
+基于 Tushare Pro + SQLite 存储
+
+优势：
+- 单文件存储，便于备份迁移
+- 支持 SQL 查询，筛选灵活
+- 批量写入高效
+- Python 内置支持
 """
 import os
 import json
-import akshare as ak
+import sqlite3
+import tushare as ts
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, List, Dict
 import time
-import random
+import threading
+import fcntl
 
-# 增加全局 User-Agent 伪装
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from config import TUSHARE_TOKEN
 
-def _patched_akshare_requests():
-    """
-    这是一个实验性技巧：尝试影响全局 requests 行为，
-    虽然 akshare 内部自建 session，但我们可以尝试提供一个稳健的 UA 列表
-    """
-    USER_AGENTS = [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ]
-    return random.choice(USER_AGENTS)
+
+# 全局线程锁
+_sync_lock = threading.Lock()
 
 
 class DataSyncService:
     """
-    本地数据同步服务
+    本地数据同步服务（SQLite 存储版）
     
-    存储结构（按股票代码分区）：
+    存储结构：
         data/
-        ├── stocks/              # 按股票代码分区
-        │   ├── 000001.parquet   # 平安银行120天历史
-        │   ├── 000002.parquet   # 万科A
-        │   └── ...
-        └── metadata.json        # 元数据
+        ├── stocks.db          # SQLite 数据库
+        └── metadata.json      # 同步元数据
     
-    使用场景：
-        - AkShare 获取涨停股池（实时）
-        - 从本地获取单只股票历史数据（快速）
+    数据表：
+        daily_data: 日期, 代码, 开盘, 最高, 最低, 收盘, 涨跌幅, 成交量, 换手率, PE, PB, 市值...
     """
+    
+    _is_syncing = False
+    _sync_start_time = None
     
     def __init__(self, data_dir: str = "data"):
         self.data_dir = data_dir
-        self.stocks_dir = os.path.join(data_dir, "stocks")
+        self.db_path = os.path.join(data_dir, "stocks.db")
         self.metadata_path = os.path.join(data_dir, "metadata.json")
-        self._stop_requested = False # 停止标志
+        self.lock_file_path = os.path.join(data_dir, ".sync.lock")
+        self._stop_requested = False
+        self._lock_fd = None
         
-        # 创建目录
-        os.makedirs(self.stocks_dir, exist_ok=True)
-
+        # 初始化 Tushare Pro
+        if not TUSHARE_TOKEN:
+            raise ValueError("Tushare Token 未配置")
+        ts.set_token(TUSHARE_TOKEN)
+        self.pro = ts.pro_api()
+        
+        # 创建目录和数据库
+        os.makedirs(data_dir, exist_ok=True)
+        self._init_database()
+    
+    def _init_database(self):
+        """初始化数据库表结构"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS daily_data (
+                    日期 TEXT NOT NULL,
+                    代码 TEXT NOT NULL,
+                    开盘 REAL,
+                    最高 REAL,
+                    最低 REAL,
+                    收盘 REAL,
+                    昨收 REAL,
+                    涨跌额 REAL,
+                    涨跌幅 REAL,
+                    成交量 REAL,
+                    成交额 REAL,
+                    换手率 REAL,
+                    量比 REAL,
+                    PE REAL,
+                    PE_TTM REAL,
+                    PB REAL,
+                    总市值 REAL,
+                    流通市值 REAL,
+                    总股本 REAL,
+                    流通股本 REAL,
+                    PRIMARY KEY (日期, 代码)
+                )
+            ''')
+            
+            # 创建索引加速查询
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_code ON daily_data(代码)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_date ON daily_data(日期)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_pct_chg ON daily_data(涨跌幅)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_pe ON daily_data(PE)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_market_cap ON daily_data(流通市值)')
+            
+            conn.commit()
+    
+    # ==================== 锁机制 ====================
+    
+    def _acquire_lock(self) -> bool:
+        if not _sync_lock.acquire(blocking=False):
+            return False
+        try:
+            self._lock_fd = open(self.lock_file_path, 'w')
+            fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_info = {"pid": os.getpid(), "start_time": datetime.now().isoformat()}
+            self._lock_fd.write(json.dumps(lock_info))
+            self._lock_fd.flush()
+            DataSyncService._is_syncing = True
+            DataSyncService._sync_start_time = datetime.now()
+            return True
+        except (IOError, OSError):
+            _sync_lock.release()
+            return False
+    
+    def _release_lock(self):
+        DataSyncService._is_syncing = False
+        DataSyncService._sync_start_time = None
+        if self._lock_fd:
+            try:
+                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
+                self._lock_fd.close()
+                if os.path.exists(self.lock_file_path):
+                    os.remove(self.lock_file_path)
+            except:
+                pass
+            self._lock_fd = None
+        try:
+            _sync_lock.release()
+        except:
+            pass
+    
+    def is_syncing(self) -> bool:
+        if DataSyncService._is_syncing:
+            return True
+        if os.path.exists(self.lock_file_path):
+            try:
+                with open(self.lock_file_path, 'r') as f:
+                    lock_info = json.load(f)
+                    pid = lock_info.get("pid")
+                    if pid:
+                        try:
+                            os.kill(pid, 0)
+                            return True
+                        except OSError:
+                            pass
+            except:
+                pass
+        return False
+    
+    def get_sync_status(self) -> dict:
+        if self.is_syncing():
+            start_time = DataSyncService._sync_start_time
+            elapsed = (datetime.now() - start_time).total_seconds() if start_time else 0
+            return {"is_syncing": True, "elapsed_seconds": int(elapsed)}
+        return {"is_syncing": False, "elapsed_seconds": 0}
+    
     def request_stop(self):
-        """请求停止同步"""
         self._stop_requested = True
-
+    
+    # ==================== 元数据 ====================
+    
     def get_metadata(self) -> dict:
-        """获取元数据"""
         if os.path.exists(self.metadata_path):
             with open(self.metadata_path, 'r') as f:
                 return json.load(f)
-        return {
-            "last_sync_date": None,
-            "total_stocks": 0,
-            "days": 0,
-            "date_range": {},
-        }
+        return {"last_sync_date": None, "total_stocks": 0, "days": 0}
     
     def save_metadata(self, metadata: dict):
-        """保存元数据"""
         with open(self.metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
     
-    def get_all_stock_codes(self) -> List[str]:
-        """获取所有A股股票代码"""
+    # ==================== 交易日历 ====================
+    
+    def get_trading_days(self, start_date: str, end_date: str) -> List[str]:
+        """获取交易日列表"""
         try:
-            df = ak.stock_info_a_code_name()
-            return df['code'].tolist()
+            df = self.pro.trade_cal(
+                exchange='SSE',
+                start_date=start_date,
+                end_date=end_date,
+                is_open='1'
+            )
+            return sorted(df['cal_date'].tolist())
         except Exception as e:
-            print(f"获取股票列表失败: {e}")
+            print(f"获取交易日历失败: {e}")
             return []
     
-    def get_synced_stocks(self) -> set:
-        """获取已同步的股票代码"""
-        synced = set()
-        if os.path.exists(self.stocks_dir):
-            for f in os.listdir(self.stocks_dir):
-                if f.endswith('.parquet'):
-                    code = f.replace('.parquet', '')
-                    synced.add(code)
-        return synced
+    # ==================== 按日期批量获取 ====================
     
-    def sync_single_stock(self, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """
-        同步单只股票的历史数据
+    def fetch_daily_by_date(self, trade_date: str) -> pd.DataFrame:
+        """按日期获取全市场日线行情"""
+        try:
+            df = self.pro.daily(trade_date=trade_date)
+            if df is not None and not df.empty:
+                df['代码'] = df['ts_code'].str[:6]
+                df = df.rename(columns={
+                    'trade_date': '日期',
+                    'open': '开盘', 'high': '最高', 'low': '最低',
+                    'close': '收盘', 'pre_close': '昨收',
+                    'change': '涨跌额', 'pct_chg': '涨跌幅',
+                    'vol': '成交量', 'amount': '成交额'
+                })
+                df = df.drop(columns=['ts_code'], errors='ignore')
+            return df
+        except Exception as e:
+            print(f"获取 {trade_date} daily 失败: {e}")
+            return pd.DataFrame()
+    
+    def fetch_daily_basic_by_date(self, trade_date: str) -> pd.DataFrame:
+        """按日期获取全市场每日指标"""
+        try:
+            df = self.pro.daily_basic(trade_date=trade_date)
+            if df is not None and not df.empty:
+                df['代码'] = df['ts_code'].str[:6]
+                df = df.rename(columns={
+                    'trade_date': '日期',
+                    'turnover_rate': '换手率',
+                    'volume_ratio': '量比',
+                    'pe': 'PE', 'pe_ttm': 'PE_TTM', 'pb': 'PB',
+                    'total_share': '总股本', 'float_share': '流通股本',
+                    'total_mv': '总市值', 'circ_mv': '流通市值'
+                })
+                keep = ['代码', '日期', '换手率', '量比', 'PE', 'PE_TTM', 'PB',
+                       '总市值', '流通市值', '总股本', '流通股本']
+                available = [c for c in keep if c in df.columns]
+                df = df[available]
+            return df
+        except Exception as e:
+            print(f"获取 {trade_date} daily_basic 失败: {e}")
+            return pd.DataFrame()
+    
+    def fetch_and_merge_by_date(self, trade_date: str) -> pd.DataFrame:
+        """按日期获取并合并 daily + daily_basic"""
+        df_daily = self.fetch_daily_by_date(trade_date)
+        if df_daily.empty:
+            return pd.DataFrame()
         
-        Args:
-            code: 股票代码
-            start_date: 起始日期 YYYYMMDD
-            end_date: 结束日期 YYYYMMDD
+        df_basic = self.fetch_daily_basic_by_date(trade_date)
+        
+        if not df_basic.empty:
+            df = df_daily.merge(df_basic, on=['代码', '日期'], how='left')
+        else:
+            df = df_daily
+        
+        return df
+    
+    # ==================== SQLite 存储 ====================
+    
+    def save_to_database(self, df: pd.DataFrame) -> int:
+        """
+        将数据保存到 SQLite（使用 REPLACE 实现 upsert）
         
         Returns:
-            K线数据 DataFrame
+            插入/更新的记录数
         """
-        max_retries = 3
+        if df.empty:
+            return 0
         
-        for attempt in range(max_retries):
-            try:
-                df = ak.stock_zh_a_hist(
-                    symbol=code,
-                    period="daily",
-                    start_date=start_date,
-                    end_date=end_date,
-                    adjust="qfq"
-                )
-                
-                if df is not None and not df.empty:
-                    df['代码'] = code
-                
-                return df
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    # 重试前等待，逐次增加等待时间
-                    time.sleep(1 + attempt * 2)
-                else:
-                    return None
+        # 确保列顺序和数据库一致
+        columns = ['日期', '代码', '开盘', '最高', '最低', '收盘', '昨收', 
+                   '涨跌额', '涨跌幅', '成交量', '成交额', '换手率', '量比',
+                   'PE', 'PE_TTM', 'PB', '总市值', '流通市值', '总股本', '流通股本']
         
-        return None
+        # 添加缺失的列
+        for col in columns:
+            if col not in df.columns:
+                df[col] = None
+        
+        df = df[columns]
+        
+        with sqlite3.connect(self.db_path) as conn:
+            # 使用 REPLACE INTO 实现 upsert
+            placeholders = ', '.join(['?' for _ in columns])
+            cols_str = ', '.join(columns)
+            sql = f'REPLACE INTO daily_data ({cols_str}) VALUES ({placeholders})'
+            
+            # 批量插入
+            data = df.values.tolist()
+            conn.executemany(sql, data)
+            conn.commit()
+            
+            return len(data)
     
-    def check_api_health(self) -> bool:
-        """检测 API 是否通畅（心跳检测）"""
-        try:
-            # 随机选一只权重股测试，如 000001
-            df = ak.stock_zh_a_hist(
-                symbol="000001",
-                period="daily",
-                start_date=(datetime.now() - timedelta(days=10)).strftime("%Y%m%d"),
-                end_date=(datetime.now() - timedelta(days=1)).strftime("%Y%m%d"),
-                adjust="qfq"
-            )
-            return df is not None and not df.empty
-        except Exception:
-            return False
-
-    def _sync_stock_incremental(self, code: str, target_days: int, end_date: str) -> dict:
-        """
-        增量同步单只股票
-        
-        增量逻辑：
-        - 检查头部：是否需要补充更早的历史数据
-        - 检查尾部：是否需要追加新数据
-        """
-        file_path = os.path.join(self.stocks_dir, f"{code}.parquet")
-        target_start = datetime.strptime(end_date, "%Y%m%d") - timedelta(days=target_days)
-        target_start_str = target_start.strftime("%Y%m%d")
-        
-        try:
-            if os.path.exists(file_path):
-                existing_df = pd.read_parquet(file_path)
-                if existing_df.empty:
-                    df = self.sync_single_stock(code, target_start_str, end_date)
-                    if df is not None and not df.empty:
-                        df.to_parquet(file_path, index=False)
-                        return {"status": "new", "new_records": len(df)}
-                    return {"status": "failed", "new_records": 0}
-                
-                existing_df['日期'] = pd.to_datetime(existing_df['日期'])
-                first_date = existing_df['日期'].min()
-                last_date = existing_df['日期'].max()
-                
-                new_records = 0
-                dfs_to_merge = [existing_df]
-                
-                # 1. 检查头部
-                if first_date > target_start:
-                    head_end = (first_date - timedelta(days=1)).strftime("%Y%m%d")
-                    head_df = self.sync_single_stock(code, target_start_str, head_end)
-                    if head_df is not None and not head_df.empty:
-                        dfs_to_merge.insert(0, head_df)
-                        new_records += len(head_df)
-                
-                # 2. 检查尾部
-                if last_date.strftime("%Y%m%d") < end_date:
-                    tail_start = (last_date + timedelta(days=1)).strftime("%Y%m%d")
-                    tail_df = self.sync_single_stock(code, tail_start, end_date)
-                    if tail_df is not None and not tail_df.empty:
-                        dfs_to_merge.append(tail_df)
-                        new_records += len(tail_df)
-                
-                if new_records > 0:
-                    combined = pd.concat(dfs_to_merge, ignore_index=True)
-                    combined['日期'] = pd.to_datetime(combined['日期'])
-                    combined = combined.drop_duplicates(subset=['日期'], keep='last')
-                    combined = combined.sort_values('日期')
-                    combined.to_parquet(file_path, index=False)
-                    return {"status": "updated", "new_records": new_records}
-                else:
-                    return {"status": "skipped", "new_records": 0}
-            else:
-                df = self.sync_single_stock(code, target_start_str, end_date)
-                if df is not None and not df.empty:
-                    df.to_parquet(file_path, index=False)
-                    return {"status": "new", "new_records": len(df)}
-                return {"status": "failed", "new_records": 0}
-        except Exception:
-            return {"status": "failed", "new_records": 0}
+    def get_synced_dates(self) -> List[str]:
+        """获取已同步的日期列表"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('SELECT DISTINCT 日期 FROM daily_data ORDER BY 日期')
+            return [row[0] for row in cursor.fetchall()]
+    
+    def get_last_synced_date(self) -> Optional[str]:
+        """获取最后同步的日期"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('SELECT MAX(日期) FROM daily_data')
+            result = cursor.fetchone()
+            return result[0] if result else None
+    
+    def get_stock_count(self) -> int:
+        """获取股票数量"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('SELECT COUNT(DISTINCT 代码) FROM daily_data')
+            return cursor.fetchone()[0]
+    
+    def get_record_count(self) -> int:
+        """获取总记录数"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute('SELECT COUNT(*) FROM daily_data')
+            return cursor.fetchone()[0]
+    
+    # ==================== 主同步逻辑 ====================
     
     def sync_all_stocks(
         self, 
         days: int = 120, 
-        max_workers: int = 1, # 建议默认单线程，避免封禁
         progress_callback=None,
         force: bool = False
     ) -> bool:
         """
-        同步所有股票的历史数据
+        同步全市场历史数据（SQLite 存储）
         
         策略：
-        - 默认单线程，避免高频请求触发 IP 封锁
-        - 定期进行 API 健康检查
-        - 触发限流后自动进入冷却，支持重试
+        1. 按日期获取全市场数据
+        2. 合并 daily + daily_basic
+        3. 批量写入 SQLite（使用事务）
         """
-        print(f"开始同步所有股票的 {days} 天历史数据...")
-        
-        all_codes = self.get_all_stock_codes()
-        if not all_codes:
+        if not self._acquire_lock():
+            print("⚠️ 另一个同步任务正在运行")
+            if progress_callback:
+                progress_callback(0, 0, "已有任务运行", "")
             return False
         
-        # 计算结束日期
-        today = datetime.now()
-        yesterday = today - timedelta(days=1)
-        end_date = yesterday.strftime("%Y%m%d")
-        start_date = (yesterday - timedelta(days=days)).strftime("%Y%m%d")
-        
-        if force:
-            for f in os.listdir(self.stocks_dir):
-                if f.endswith('.parquet'):
-                    os.remove(os.path.join(self.stocks_dir, f))
-        
-        stats = {"new": 0, "updated": 0, "skipped": 0, "failed": 0, "new_records": 0}
-        cool_down_minutes = 5
-        consecutive_fails = 0
-        
-        # 使用单线程或多线程执行
-        self._stop_requested = False
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for code in all_codes:
-                futures[executor.submit(self._sync_stock_incremental, code, days, end_date)] = code
+        try:
+            print(f"🚀 开始同步 {days} 天数据（SQLite 存储模式）...")
             
-            for i, future in enumerate(as_completed(futures)):
-                # 检查中断指令
+            # 计算日期范围
+            today = datetime.now()
+            end_date = (today - timedelta(days=1)).strftime("%Y%m%d")
+            start_date = (today - timedelta(days=days)).strftime("%Y%m%d")
+            
+            # 获取交易日列表
+            trading_days = self.get_trading_days(start_date, end_date)
+            if not trading_days:
+                print("❌ 获取交易日历失败")
+                return False
+            
+            print(f"📅 交易日范围: {trading_days[0]} ~ {trading_days[-1]}，共 {len(trading_days)} 个交易日")
+            
+            # 增量模式
+            if not force:
+                last_synced = self.get_last_synced_date()
+                if last_synced:
+                    trading_days = [d for d in trading_days if d > last_synced]
+                    if not trading_days:
+                        print("✅ 数据已是最新")
+                        return True
+                    print(f"📊 增量同步: {len(trading_days)} 个新交易日")
+            else:
+                print("⚠️ 强制同步模式，清空数据库...")
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute('DELETE FROM daily_data')
+                    conn.commit()
+            
+            # 同步
+            total_records = 0
+            self._stop_requested = False
+            
+            for i, trade_date in enumerate(trading_days):
                 if self._stop_requested:
-                    print("接收到手动中断指令，正在停止同步...")
-                    if progress_callback:
-                        progress_callback(i, len(all_codes), "N/A", "手动中断中...")
+                    print("⏹️ 收到停止信号")
                     break
                 
-                code = futures[future]
+                # 获取数据
+                df = self.fetch_and_merge_by_date(trade_date)
                 
-                # 每50只股票做一次健康检查
-                if (i + 1) % 50 == 0:
-                    if not self.check_api_health():
-                        print(f"检测到 API 受限，进入冷却 {cool_down_minutes} 分钟...")
-                        if progress_callback:
-                            progress_callback(i + 1, len(all_codes), code, f"触发限流，进入冷却({cool_down_minutes}min)")
-                        time.sleep(cool_down_minutes * 60)
-                        
-                        # 冷却后再次检查
-                        while not self.check_api_health():
-                            print("依然受限，继续等待...")
-                            time.sleep(60)
+                if not df.empty:
+                    # 保存到 SQLite
+                    count = self.save_to_database(df)
+                    total_records += count
+                    status = f"获取 {len(df)} 条，累计 {total_records} 条"
+                else:
+                    status = "无数据"
                 
-                try:
-                    result = future.result(timeout=60) # 增加超时控制
-                    status = result["status"]
-                    stats[status] += 1
-                    stats["new_records"] += result["new_records"]
-                    
-                    if status == "failed":
-                        consecutive_fails += 1
-                    else:
-                        consecutive_fails = 0
-                except Exception:
-                    stats["failed"] += 1
-                    consecutive_fails += 1
-                
-                # 如果连续失败太多，很可能已经由 IP 被封，停止
-                if consecutive_fails > 10:
-                    print("连续失败超过10次，强制停止同步以保护 IP")
-                    if progress_callback:
-                        progress_callback(i + 1, len(all_codes), code, "严重限流，已停止同步")
-                    return False
-                
-                # 进度回调
                 if progress_callback:
-                    status_text = "同步中" if stats["failed"] == 0 else f"正在同步 (失败:{stats['failed']})"
-                    progress_callback(i + 1, len(all_codes), code, status_text)
+                    progress_callback(i + 1, len(trading_days), trade_date, status)
                 
-                # 微延迟，避免请求频率过高
-                if max_workers == 1:
-                    time.sleep(0.5)
-                elif (i + 1) % 10 == 0:
-                    time.sleep(1)
-        
-        print(f"同步完成: 新增 {stats['new']}, 更新 {stats['updated']}, 跳过 {stats['skipped']}, 失败 {stats['failed']}")
-        
-        metadata = {
-            "last_sync_date": datetime.now().isoformat(),
-            "total_stocks": len(self.get_synced_stocks()),
-            "days": days,
-            "date_range": {"start": start_date, "end": end_date}
-        }
-        self.save_metadata(metadata)
-        return True
-    
-    def get_stock_history(self, code: str) -> pd.DataFrame:
-        """
-        从本地获取单只股票的历史数据
-        
-        Args:
-            code: 股票代码
-        
-        Returns:
-            股票历史数据 DataFrame
-        """
-        file_path = os.path.join(self.stocks_dir, f"{code}.parquet")
-        
-        if os.path.exists(file_path):
-            return pd.read_parquet(file_path)
-        
-        return pd.DataFrame()
-    
-    def get_stock_history_or_fetch(self, code: str, days: int = 120) -> pd.DataFrame:
-        """
-        获取股票历史数据，本地没有则从 AkShare 获取
-        
-        Args:
-            code: 股票代码
-            days: 天数
-        
-        Returns:
-            股票历史数据 DataFrame
-        """
-        # 先尝试从本地获取
-        df = self.get_stock_history(code)
-        if not df.empty:
-            return df
-        
-        # 本地没有，从 AkShare 获取
-        print(f"本地无 {code} 数据，从 AkShare 获取...")
-        yesterday = datetime.now() - timedelta(days=1)
-        end_date = yesterday.strftime("%Y%m%d")
-        start_date = (yesterday - timedelta(days=days)).strftime("%Y%m%d")
-        
-        df = self.sync_single_stock(code, start_date, end_date)
-        
-        # 保存到本地
-        if df is not None and not df.empty:
-            file_path = os.path.join(self.stocks_dir, f"{code}.parquet")
-            df.to_parquet(file_path, index=False)
-        
-        return df if df is not None else pd.DataFrame()
-    
-    def update_stock(self, code: str) -> bool:
-        """
-        更新单只股票的数据（增量更新）
-        
-        Args:
-            code: 股票代码
-        
-        Returns:
-            是否成功
-        """
-        existing_df = self.get_stock_history(code)
-        
-        if existing_df.empty:
-            # 没有历史数据，全量获取
-            df = self.get_stock_history_or_fetch(code)
-            return not df.empty
-        
-        # 获取已有数据的最后日期
-        existing_df['日期'] = pd.to_datetime(existing_df['日期'])
-        last_date = existing_df['日期'].max()
-        
-        # 从最后日期+1天开始获取
-        start_date = (last_date + timedelta(days=1)).strftime("%Y%m%d")
-        yesterday = datetime.now() - timedelta(days=1)
-        end_date = yesterday.strftime("%Y%m%d")
-        
-        if start_date > end_date:
-            print(f"{code} 已是最新数据")
+                # 短暂间隔
+                time.sleep(0.15)
+            
+            # 保存元数据
+            metadata = {
+                "last_sync_date": datetime.now().isoformat(),
+                "total_stocks": self.get_stock_count(),
+                "total_records": self.get_record_count(),
+                "days": days,
+                "date_range": {
+                    "start": trading_days[0] if trading_days else start_date,
+                    "end": trading_days[-1] if trading_days else end_date
+                },
+                "storage": "sqlite",
+                "db_file": self.db_path
+            }
+            self.save_metadata(metadata)
+            
+            print(f"✅ 同步完成: {len(trading_days)} 个交易日, {self.get_stock_count()} 只股票, {total_records} 条记录")
             return True
         
-        # 获取增量数据
-        new_df = self.sync_single_stock(code, start_date, end_date)
-        
-        if new_df is not None and not new_df.empty:
-            # 合并数据
-            combined = pd.concat([existing_df, new_df], ignore_index=True)
-            combined = combined.drop_duplicates(subset=['日期'], keep='last')
-            combined = combined.sort_values('日期')
-            
-            # 保存
-            file_path = os.path.join(self.stocks_dir, f"{code}.parquet")
-            combined.to_parquet(file_path, index=False)
-            print(f"更新 {code}: 新增 {len(new_df)} 条记录")
-        
-        return True
+        finally:
+            self._release_lock()
     
-    def get_sync_status(self) -> dict:
-        """获取同步状态"""
+    # ==================== 数据查询 ====================
+    
+    def get_stock_history(self, code: str, days: int = None) -> pd.DataFrame:
+        """获取单只股票历史数据"""
+        sql = 'SELECT * FROM daily_data WHERE 代码 = ? ORDER BY 日期'
+        params = [code]
+        
+        if days:
+            sql = 'SELECT * FROM daily_data WHERE 代码 = ? ORDER BY 日期 DESC LIMIT ?'
+            params = [code, days]
+        
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql_query(sql, conn, params=params)
+        
+        if days:
+            df = df.sort_values('日期')
+        
+        return df
+    
+    def get_daily_data(self, trade_date: str) -> pd.DataFrame:
+        """获取某一天的全市场数据"""
+        sql = 'SELECT * FROM daily_data WHERE 日期 = ?'
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(sql, conn, params=[trade_date])
+    
+    def query(self, sql: str, params: tuple = None) -> pd.DataFrame:
+        """执行自定义 SQL 查询"""
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(sql, conn, params=params)
+    
+    def get_stocks_by_filter(
+        self,
+        trade_date: str = None,
+        min_pct_chg: float = None,
+        max_pct_chg: float = None,
+        min_pe: float = None,
+        max_pe: float = None,
+        min_pb: float = None,
+        max_pb: float = None,
+        max_market_cap: float = None,  # 亿
+        min_turnover: float = None,
+        limit: int = 100
+    ) -> pd.DataFrame:
+        """
+        按条件筛选股票
+        
+        示例：
+            # 获取涨停股
+            get_stocks_by_filter(trade_date='20260130', min_pct_chg=9.5)
+            
+            # 获取低 PE 小盘股
+            get_stocks_by_filter(max_pe=20, max_market_cap=50)
+        """
+        conditions = []
+        params = []
+        
+        if trade_date:
+            conditions.append('日期 = ?')
+            params.append(trade_date)
+        
+        if min_pct_chg is not None:
+            conditions.append('涨跌幅 >= ?')
+            params.append(min_pct_chg)
+        
+        if max_pct_chg is not None:
+            conditions.append('涨跌幅 <= ?')
+            params.append(max_pct_chg)
+        
+        if min_pe is not None:
+            conditions.append('PE >= ?')
+            params.append(min_pe)
+        
+        if max_pe is not None:
+            conditions.append('PE <= ?')
+            params.append(max_pe)
+        
+        if min_pb is not None:
+            conditions.append('PB >= ?')
+            params.append(min_pb)
+        
+        if max_pb is not None:
+            conditions.append('PB <= ?')
+            params.append(max_pb)
+        
+        if max_market_cap is not None:
+            conditions.append('流通市值 <= ?')
+            params.append(max_market_cap * 1e4)  # 亿 -> 万
+        
+        if min_turnover is not None:
+            conditions.append('换手率 >= ?')
+            params.append(min_turnover)
+        
+        where_clause = ' AND '.join(conditions) if conditions else '1=1'
+        sql = f'''
+            SELECT * FROM daily_data 
+            WHERE {where_clause}
+            ORDER BY 日期 DESC, 涨跌幅 DESC
+            LIMIT ?
+        '''
+        params.append(limit)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            return pd.read_sql_query(sql, conn, params=params)
+    
+    def get_zt_stocks(self, trade_date: str) -> pd.DataFrame:
+        """获取涨停股（涨幅 >= 9.5%）"""
+        return self.get_stocks_by_filter(trade_date=trade_date, min_pct_chg=9.5, limit=500)
+    
+    def get_sync_status_info(self) -> dict:
+        """获取同步状态信息"""
         metadata = self.get_metadata()
         
-        # 统计本地文件
-        synced_stocks = self.get_synced_stocks()
-        total_size = 0
-        if os.path.exists(self.stocks_dir):
-            for f in os.listdir(self.stocks_dir):
-                if f.endswith('.parquet'):
-                    total_size += os.path.getsize(os.path.join(self.stocks_dir, f))
+        db_size = 0
+        if os.path.exists(self.db_path):
+            db_size = os.path.getsize(self.db_path) / 1024 / 1024
         
         return {
             "last_sync": metadata.get("last_sync_date"),
-            "total_stocks": len(synced_stocks),
+            "total_stocks": self.get_stock_count(),
+            "total_records": self.get_record_count(),
             "days": metadata.get("days", 0),
             "date_range": metadata.get("date_range", {}),
-            "total_size_mb": round(total_size / 1024 / 1024, 2),
+            "db_size_mb": round(db_size, 2),
+            "storage": "sqlite",
+            "db_file": self.db_path
         }
 
 
@@ -439,37 +542,31 @@ class DataSyncService:
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="A股数据同步工具")
+    parser = argparse.ArgumentParser(description="A股数据同步工具（SQLite 存储）")
     parser.add_argument("--days", type=int, default=120, help="同步天数")
-    parser.add_argument("--workers", type=int, default=3, help="并发数")
-    parser.add_argument("--status", action="store_true", help="查看同步状态")
+    parser.add_argument("--status", action="store_true", help="查看状态")
     parser.add_argument("--force", action="store_true", help="强制全量同步")
+    parser.add_argument("--query", type=str, help="执行 SQL 查询")
     
     args = parser.parse_args()
-    
     sync = DataSyncService()
     
     if args.status:
-        status = sync.get_sync_status()
+        status = sync.get_sync_status_info()
         print("📊 同步状态:")
-        print(f"  最后同步: {status['last_sync']}")
+        print(f"  数据库: {status['db_file']}")
+        print(f"  大小: {status['db_size_mb']} MB")
         print(f"  股票数量: {status['total_stocks']}")
-        print(f"  同步天数: {status['days']}")
-        print(f"  数据大小: {status['total_size_mb']} MB")
+        print(f"  记录总数: {status['total_records']}")
         print(f"  日期范围: {status['date_range']}")
+        print(f"  最后同步: {status['last_sync']}")
+    elif args.query:
+        print(f"执行查询: {args.query}")
+        df = sync.query(args.query)
+        print(df.to_string())
     else:
-        if args.force:
-            print("⚠️ 强制全量同步模式")
-        else:
-            print("📊 增量同步模式（将跳过已同步的股票）")
+        def progress(current, total, date, status):
+            pct = current / total * 100 if total > 0 else 0
+            print(f"[{current}/{total}] {pct:.0f}% | {date} | {status}")
         
-        def progress(current, total, code):
-            if current % 100 == 0:
-                print(f"进度: {current}/{total} ({current/total*100:.1f}%)")
-        
-        sync.sync_all_stocks(
-            days=args.days, 
-            max_workers=args.workers, 
-            progress_callback=progress,
-            force=args.force
-        )
+        sync.sync_all_stocks(days=args.days, progress_callback=progress, force=args.force)

@@ -1,0 +1,7 @@
+# 远程同步脚本依赖
+# 使用: pip install -r requirements.txt
+
+akshare>=1.18.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+tqdm>=4.65.0

@@ -1,4 +1,6 @@
-akshare>=1.18.0
+tushare>=1.4.0
 streamlit>=1.30.0
 pyecharts>=2.0.0
 pandas>=2.0.0
+
+

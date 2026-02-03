@@ -1,8 +1,16 @@
 """
-数据服务模块
+数据服务模块（基于 Tushare Pro）
 """
 from .stock_service import StockService
 from .cache_service import CacheService
 from .data_sync_service import DataSyncService
+from .tushare_service import TushareService, get_tushare_service
 
-__all__ = ["StockService", "CacheService", "DataSyncService"]
+__all__ = [
+    "StockService", 
+    "CacheService", 
+    "DataSyncService",
+    "TushareService",
+    "get_tushare_service"
+]
+
