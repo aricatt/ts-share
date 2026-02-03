@@ -605,18 +605,19 @@ class DataSyncService:
                 progress_callback(len(trading_days), len(trading_days), "计算中", "计算均线指标...")
             self.recompute_technical_indicators()
             
-            # 保存元数据
+            # 保存元数据（反映数据库全量状态）
+            all_synced_dates = self.get_synced_dates()
             metadata = {
                 "last_sync_date": datetime.now().isoformat(),
                 "total_stocks": self.get_stock_count(),
                 "total_records": self.get_record_count(),
-                "days": days,
+                "total_days": len(all_synced_dates),
                 "date_range": {
-                    "start": trading_days[0] if trading_days else start_date,
-                    "end": trading_days[-1] if trading_days else end_date
+                    "start": all_synced_dates[0] if all_synced_dates else None,
+                    "end": all_synced_dates[-1] if all_synced_dates else None
                 },
                 "storage": "sqlite",
-                "db_file": self.db_path
+                "db_file": os.path.relpath(self.db_path)
             }
             self.save_metadata(metadata)
             

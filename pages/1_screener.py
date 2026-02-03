@@ -92,9 +92,9 @@ if st.sidebar.button("🚀 开始筛选", type="primary", use_container_width=Tr
                 # 应用策略
                 if rule_instance.requires_history:
                     # 需要历史数据的策略
-                    result = rule_instance.apply(df, history_provider=stock_service)
+                    result = rule_instance.apply(df, history_provider=stock_service, date_str=date_str)
                 else:
-                    result = rule_instance.apply(df)
+                    result = rule_instance.apply(df, date_str=date_str)
                 
                 # 显示统计
                 st.markdown("---")
@@ -162,7 +162,7 @@ if st.sidebar.button("🚀 开始筛选", type="primary", use_container_width=Tr
                     
                     # 格式化列
                     if '总市值' in display_df.columns:
-                        display_df['总市值(亿)'] = (display_df['总市值'] / 1e8).round(2)
+                        display_df['总市值(亿)'] = (display_df['总市值'] / 10000).round(2)
                         display_df = display_df.drop('总市值', axis=1)
                     if '涨跌幅' in display_df.columns:
                         display_df['涨跌幅'] = display_df['涨跌幅'].round(2).astype(str) + '%'

@@ -91,23 +91,40 @@ class RuleDragonPullback(BaseRule):
             return result
         
         # 4. 逐只股票检查历史条件
-        before_history = len(result)
+        # 现在利用数据库中的预算指标进行加速
         valid_codes = []
+        trade_date = kwargs.get('date_str')
+        
+        # 批量获取所有候选股的历史收盘价（用于计算涨幅和回落）
+        # 这里为了演示，我们先按照之前的逻辑优化：如果能从 DB 拿指标就直接用
         for _, row in result.iterrows():
             code = row['代码']
             try:
+                # 优先检查当前行的 DB 指标（如果存在）
+                # 注意：如果 df 是实时行情，可能没有这些列，逻辑会回退到 get_history
+                has_db_indicators = all(k in row for k in ['ma20', 'ma60', 'vma5', 'qfq_收盘'])
+                
+                if has_db_indicators:
+                    # 直接用现有列做初步排除，减少 get_history 调用
+                    latest_close = row['qfq_收盘']
+                    if latest_close <= row['ma60'] or latest_close >= row['ma20']:
+                        continue
+                    if row['成交量'] >= row['vma5']:
+                        continue
+                
+                # 剩下的再查历史算涨幅
                 hist = history_provider.get_history(code, self.history_days)
                 if hist is not None and self._check_history_conditions(hist):
                     valid_codes.append(code)
             except Exception as e:
-                print(f"获取 {code} 历史数据失败: {e}")
+                print(f"检查 {code} 失败: {e}")
                 continue
         
         result = result[result['代码'].isin(valid_codes)]
         self.tracker.record(
-            "历史条件筛选",
+            "满足龙回头特征",
             result,
-            f"4月涨>{self.min_4m_change}%, 1月跌>{abs(self.max_1m_change)}%, MA条件"
+            f"4月涨>{self.min_4m_change}%, 1月跌>{abs(self.max_1m_change)}%, 缩量站稳MA60"
         )
         
         return result
@@ -117,31 +134,40 @@ class RuleDragonPullback(BaseRule):
         if len(hist) < 60:  # 至少需要60天数据
             return False
         
-        # 1. 近4月涨幅 > 50%
-        change_4m = calc_period_change(hist, 80)
+        # 使用前复权价格计算（避免除权干扰）
+        price_col = 'qfq_收盘' if 'qfq_收盘' in hist.columns else '收盘'
+        high_col = 'qfq_最高' if 'qfq_最高' in hist.columns else '最高'
+        
+        # 1. 近4月涨幅 > 50% (约 80 交易日)
+        price_now = hist[price_col].iloc[-1]
+        idx_4m = max(0, len(hist) - 81)
+        price_4m_ago = hist[price_col].iloc[idx_4m]
+        change_4m = (price_now / price_4m_ago - 1) * 100 if price_4m_ago > 0 else 0
+        
         if change_4m < self.min_4m_change:
             return False
         
-        # 2. 近1月跌幅 > 10%（即涨幅 < -10%）
-        change_1m = calc_period_change(hist, 20)
-        if change_1m > self.max_1m_change:
+        # 2. 自近1月高点回落 > 10%
+        idx_1m = max(0, len(hist) - 21)
+        recent_hist = hist.iloc[idx_1m:]
+        max_price_1m = recent_hist[high_col].max()
+        drop_1m = (price_now / max_price_1m - 1) * 100 if max_price_1m > 0 else 0
+        
+        if drop_1m > self.max_1m_change: # max_1m_change 为 -10.0
             return False
         
-        # 3. 收盘价 > MA60
-        ma60 = calc_ma(hist, 60).iloc[-1]
-        latest_close = hist['收盘'].iloc[-1]
-        if latest_close <= ma60:
+        # 3. 收盘价位置：MA60 < 收盘 < MA20
+        # 优先使用预计算的均线
+        latest = hist.iloc[-1]
+        ma60 = latest['ma60'] if 'ma60' in latest and pd.notnull(latest['ma60']) else calc_ma(hist, 60).iloc[-1]
+        ma20 = latest['ma20'] if 'ma20' in latest and pd.notnull(latest['ma20']) else calc_ma(hist, 20).iloc[-1]
+        
+        if price_now <= ma60 or price_now >= ma20:
             return False
         
-        # 4. 收盘价 < MA20
-        ma20 = calc_ma(hist, 20).iloc[-1]
-        if latest_close >= ma20:
-            return False
-        
-        # 5. 成交量 < 5日均量
-        vol_ma5 = calc_volume_ma(hist, 5).iloc[-1]
-        latest_vol = hist['成交量'].iloc[-1]
-        if latest_vol >= vol_ma5:
+        # 4. 缩量检查：当前成交量 < 5日均量
+        vma5 = latest['vma5'] if 'vma5' in latest and pd.notnull(latest['vma5']) else calc_volume_ma(hist, 5).iloc[-1]
+        if latest['成交量'] >= vma5:
             return False
         
         return True

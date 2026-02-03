@@ -88,7 +88,11 @@ class StockService:
             return pd.DataFrame()
         
         with sqlite3.connect(self.db_path) as conn:
-            return pd.read_sql_query(sql, conn, params=params)
+            df = pd.read_sql_query(sql, conn, params=params)
+            # 全局防护：移除由于 JOIN 产生的重复列
+            if not df.empty:
+                df = df.loc[:, ~df.columns.duplicated()]
+            return df
     
     # ==================== 涨停股池 ====================
     
@@ -108,7 +112,7 @@ class StockService:
         # 从本地数据库查询
         if self._db_exists():
             sql = '''
-                SELECT d.*, b.名称 
+                SELECT d.*, b.名称, b.行业
                 FROM daily_data d
                 LEFT JOIN stock_basic b ON d.代码 = b.代码
                 WHERE d.日期 = ? AND d.涨跌幅 >= 9.5
@@ -117,6 +121,8 @@ class StockService:
             df = self._query_db(sql, (date,))
             
             if not df.empty:
+                # 移除重复列
+                df = df.loc[:, ~df.columns.duplicated()]
                 if self.cache:
                     is_today = date == datetime.now().strftime("%Y%m%d")
                     self.cache.set(cache_key, df, expire_today=is_today)
@@ -155,7 +161,7 @@ class StockService:
         # 1. 从本地数据库获取
         if self._db_exists():
             sql = '''
-                SELECT d.*, b.名称 
+                SELECT d.*, b.名称, b.行业, b.地区, b.上市日期
                 FROM daily_data d
                 LEFT JOIN stock_basic b ON d.代码 = b.代码
                 WHERE d.代码 = ? 
@@ -314,7 +320,7 @@ class StockService:
         
         where_clause = ' AND '.join(conditions) if conditions else '1=1'
         sql = f'''
-            SELECT d.*, b.名称 
+            SELECT d.*, b.名称, b.行业, b.地区
             FROM daily_data d
             LEFT JOIN stock_basic b ON d.代码 = b.代码
             WHERE {where_clause.replace('日期', 'd.日期').replace('涨跌幅', 'd.涨跌幅').replace('PE', 'd.PE').replace('流通市值', 'd.流通市值').replace('换手率', 'd.换手率')}
@@ -368,30 +374,40 @@ class StockService:
         elif source == "all_stocks":
             return self.get_realtime_quotes()
         elif source == "historical_zt":
-            return self.get_historical_zt_stocks(days=90)
+            return self.get_historical_zt_stocks(date=date, days=90)
         else:
             raise ValueError(f"未知数据源类型: {source}")
     
-    def get_historical_zt_stocks(self, days: int = 90) -> pd.DataFrame:
-        """获取历史涨停过的股票"""
+    def get_historical_zt_stocks(self, date: str = None, days: int = 90) -> pd.DataFrame:
+        """获取历史涨停过的股票极其目标日期的行情"""
         if not self._db_exists():
             return pd.DataFrame()
         
-        # 从数据库查询最近 N 天涨停过的股票
-        sql = '''
+        # 1. 找出过去 N 天涨停过的代码池
+        if not date:
+            date = datetime.now().strftime("%Y%m%d")
+            
+        sql_codes = '''
             SELECT DISTINCT 代码 FROM daily_data 
-            WHERE 涨跌幅 >= 9.5
+            WHERE 涨跌幅 >= 9.5 AND 日期 <= ? AND 日期 >= ?
         '''
-        codes_df = self._query_db(sql)
+        start_date = (datetime.strptime(date, "%Y%m%d") - timedelta(days=days)).strftime("%Y%m%d")
+        codes_df = self._query_db(sql_codes, (date, start_date))
         
         if codes_df.empty:
             return pd.DataFrame()
-        
-        # 获取这些股票的最新行情
+            
         codes = codes_df['代码'].tolist()
-        realtime = self.get_realtime_quotes()
+        codes_placeholder = ', '.join(['?'] * len(codes))
         
-        if not realtime.empty and '代码' in realtime.columns:
-            return realtime[realtime['代码'].isin(codes)]
-        
-        return pd.DataFrame()
+        # 2. 获取目标日期的完整指标
+        sql_data = f'''
+            SELECT d.*, b.名称, b.行业, b.地区
+            FROM daily_data d
+            LEFT JOIN stock_basic b ON d.代码 = b.代码
+            WHERE d.日期 = ? AND d.代码 IN ({codes_placeholder})
+        '''
+        df = self._query_db(sql_data, (date, *codes))
+        if not df.empty:
+            df = df.loc[:, ~df.columns.duplicated()]
+        return df
