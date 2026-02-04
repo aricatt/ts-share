@@ -9,6 +9,7 @@ from .atomic import (
     filter_by_market_cap,
     filter_by_limit_up,
     filter_by_change,
+    filter_by_not_one_word,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "filter_by_market_cap",
     "filter_by_limit_up",
     "filter_by_change",
+    "filter_by_not_one_word",
 ]

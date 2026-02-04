@@ -103,18 +103,40 @@ def filter_by_market_cap(
     return result
 
 
-def filter_by_limit_up(df: pd.DataFrame, threshold: float = 9.9) -> pd.DataFrame:
+def filter_by_limit_up(df: pd.DataFrame) -> pd.DataFrame:
     """
-    筛选涨停股
+    筛选涨停股 (自动识别板块差异化涨幅)
+    
+    判定标准：
+    - 创业板/科创板 (300/688): >= 19.9%
+    - 北交所 (8/4/9): >= 29.9%
+    - ST 股票: >= 4.9%
+    - 主板/其他: >= 9.9%
     
     Args:
-        df: 股票数据 DataFrame，需包含 '涨跌幅' 列
-        threshold: 涨停阈值，默认 9.9%
+        df: 股票数据 DataFrame，需包含 '代码' 列，可选包含 '名称' 列
     
     Returns:
         涨停股 DataFrame
     """
-    return df[df['涨跌幅'] >= threshold]
+    if df.empty:
+        return df
+        
+    # 默认阈值为 10cm (主板)
+    thresholds = pd.Series(9.9, index=df.index)
+    
+    if '代码' in df.columns:
+        # 创业板(30) 和 科创板(688) 为 20cm
+        # 注意：创业板包含 300, 301 等开头的代码
+        thresholds.loc[df['代码'].str.startswith(('30', '688'))] = 19.9
+        # 北交所 (8/4/9) 为 30cm
+        thresholds.loc[df['代码'].str.startswith(('8', '4', '9'))] = 29.9
+        
+    if '名称' in df.columns:
+        # ST 股为 5cm
+        thresholds.loc[df['名称'].str.contains('ST', case=False, na=False)] = 4.9
+    
+    return df[df['涨跌幅'] >= thresholds]
 
 
 def filter_by_change(
@@ -143,3 +165,24 @@ def filter_by_change(
         result = result[result[column] <= max_val]
     
     return result
+
+def filter_by_not_one_word(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    过滤一字板
+    
+    一字板判定标准：开盘价 == 收盘价
+    非一字板：开盘价 != 收盘价
+    
+    Args:
+        df: 股票数据 DataFrame，需包含 '开盘' 和 '收盘' 或相应价格列
+    
+    Returns:
+        过滤后的 DataFrame
+    """
+    # 兼容不同数据源的列名
+    open_col = '开盘' if '开盘' in df.columns else ('open' if 'open' in df.columns else None)
+    close_col = '收盘' if '收盘' in df.columns else ('close' if 'close' in df.columns else None)
+    
+    if open_col and close_col:
+        return df[df[open_col] != df[close_col]]
+    return df

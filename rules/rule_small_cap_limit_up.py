@@ -3,6 +3,7 @@
 
 筛选条件：
 - 涨停板
+- 非一字板
 - 换手率 < 10%
 - 非创业板
 - 非科创板
@@ -18,6 +19,7 @@ from filters import (
     filter_by_turnover,
     filter_by_market_cap,
     filter_by_limit_up,
+    filter_by_not_one_word,
 )
 from config import MARKET_CAP_UNIT
 
@@ -26,7 +28,7 @@ class RuleSmallCapLimitUp(BaseRule):
     """小盘涨停异动策略"""
     
     name = "小盘涨停异动"
-    description = "涨停板 + 换手率<10% + 非创/科/北/ST + 市值<100亿"
+    description = "涨停板 + 非一字板 + 换手率<10% + 非创/科/北/ST + 市值<100亿"
     requires_history = False
     
     def __init__(
@@ -54,7 +56,15 @@ class RuleSmallCapLimitUp(BaseRule):
         self.tracker.record(
             "涨停筛选", 
             result, 
-            f"涨跌幅 >= 9.9%"
+            "自动识别板块涨停阈值 (主板10%/创科20%/北30%/ST5%)"
+        )
+        
+        # 1.5. 非一字板筛选
+        result = filter_by_not_one_word(result)
+        self.tracker.record(
+            "非一字板筛选",
+            result,
+            "排除开盘价等于收盘价的个股"
         )
         
         # 2. 换手率筛选
