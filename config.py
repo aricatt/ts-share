@@ -26,8 +26,8 @@ DEFAULT_EXCLUDE_EXCHANGES = ["创业板", "科创板", "北交所"]
 # 默认排除 ST
 DEFAULT_EXCLUDE_ST = True
 
-# 市值单位（亿）
-MARKET_CAP_UNIT = 1e8
+# 市值换算单位：从“亿”换算为数据库单位“万元”
+MARKET_CAP_UNIT = 10000.0
 
 # ==================== Tushare Pro API 接口映射 ====================
 # 以下是 tushare pro 常用接口列表（需要相应积分权限）

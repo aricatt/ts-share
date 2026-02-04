@@ -9,7 +9,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional, List
 from .cache_service import CacheService
-from config import TUSHARE_TOKEN
+from config import TUSHARE_TOKEN, MARKET_CAP_UNIT
 
 
 class StockService:
@@ -336,7 +336,7 @@ class StockService:
         
         if max_market_cap is not None:
             conditions.append('流通市值 <= ?')
-            params.append(max_market_cap * 1e4)
+            params.append(max_market_cap * MARKET_CAP_UNIT)
         
         if min_turnover is not None:
             conditions.append('换手率 >= ?')

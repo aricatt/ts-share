@@ -23,11 +23,13 @@ def filter_by_exchange(df: pd.DataFrame, exclude: Optional[List[str]] = None) ->
     result = df.copy()
     
     if '创业板' in exclude:
-        result = result[~result['代码'].str.startswith('300')]
+        # 兼容 300, 301 等所有创业板号段
+        result = result[~result['代码'].str.startswith('30')]
     if '科创板' in exclude:
         result = result[~result['代码'].str.startswith('688')]
     if '北交所' in exclude:
-        result = result[~result['代码'].str.startswith('8')]
+        # 北交所主要包含 43, 83, 87, 88, 82 等号段
+        result = result[~result['代码'].str.startswith(('43', '83', '87', '88', '82', '9'))]
     
     return result
 

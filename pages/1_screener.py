@@ -9,6 +9,7 @@ from services import StockService
 from rules import get_rule, get_all_rules
 from components.charts import render_chart, create_industry_pie, create_turnover_bar, create_market_cap_bar, create_kline_chart
 from components.widgets import result_stats
+from config import MARKET_CAP_UNIT
 
 # 页面配置
 st.set_page_config(page_title="选股器 - TS-Share", page_icon="📊", layout="wide")
@@ -47,9 +48,10 @@ for key, config in params.items():
     if config['type'] == 'float':
         adjusted_params[key] = st.sidebar.slider(
             config['label'],
-            min_value=0.0,
-            max_value=100.0,
+            min_value=float(config.get('min', 0.0)),
+            max_value=float(config.get('max', 100.0)),
             value=float(config['value']),
+            step=float(config.get('step', 0.1)),
             key=f"param_{key}"
         )
     elif config['type'] == 'bool':
@@ -58,10 +60,32 @@ for key, config in params.items():
             value=config['value'],
             key=f"param_{key}"
         )
+    elif config['type'] == 'select':
+        adjusted_params[key] = st.sidebar.selectbox(
+            config['label'],
+            options=config['options'],
+            index=config['options'].index(config['value']) if config['value'] in config['options'] else 0,
+            key=f"param_{key}"
+        )
+    elif config['type'] == 'list':
+        adjusted_params[key] = st.sidebar.multiselect(
+            config['label'],
+            options=config.get('options', config['value']),
+            default=config['value'],
+            key=f"param_{key}"
+        )
 
-# 初始化 session_state 用于持久化筛选结果
+# 初始化 session_state
 if 'screener_results' not in st.session_state:
     st.session_state.screener_results = None
+if 'table_version' not in st.session_state:
+    st.session_state.table_version = 0
+if 'pending_details' not in st.session_state:
+    st.session_state.pending_details = None
+
+def reset_table_selection():
+    """通过微调表格 key 来重置选中状态"""
+    st.session_state.table_version += 1
 
 # ========== 收藏功能模块 ==========
 
@@ -86,13 +110,16 @@ def display_collections(rule_name):
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="single-row",
-                key=f"fav_table_{rule_name}"
+                key=f"fav_table_{rule_name}_v{st.session_state.table_version}"
             )
             
             if fav_selected and "rows" in fav_selected.selection and len(fav_selected.selection.rows) > 0:
                 row_idx = fav_selected.selection.rows[0]
                 sel_row = disp_fav.iloc[row_idx]
-                show_stock_details(sel_row['代码'], sel_row['名称'])
+                # 记录待展示详情，增加版本号触发重载清空选中
+                st.session_state.pending_details = (sel_row['代码'], sel_row['名称'])
+                reset_table_selection()
+                st.rerun()
 
 # 处理收藏逻辑
 def toggle_collection(code, name, rule_name):
@@ -140,7 +167,7 @@ if st.sidebar.button("🚀 开始筛选", type="primary", use_container_width=Tr
             rule_instance = get_rule(selected_rule)
             for key, value in adjusted_params.items():
                 if hasattr(rule_instance, key):
-                    if key == 'max_market_cap': value = value * 1e8
+                    if key == 'max_market_cap': value = value * MARKET_CAP_UNIT
                     setattr(rule_instance, key, value)
             
             df = stock_service.get_data_by_source(rule_instance.data_source, date_str)
@@ -203,13 +230,16 @@ if st.session_state.screener_results:
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="single-row",
-                key="screener_result_table"
+                key=f"screener_result_table_v{st.session_state.table_version}"
             )
 
             if selected and "rows" in selected.selection and len(selected.selection.rows) > 0:
                 row_idx = selected.selection.rows[0]
                 sel_row = display_view.iloc[row_idx]
-                show_stock_details(sel_row['代码'], sel_row['名称'])
+                # 记录待展示详情，增加版本号触发重载清空选中
+                st.session_state.pending_details = (sel_row['代码'], sel_row['名称'])
+                reset_table_selection()
+                st.rerun()
 
         # 图表分析
         st.markdown("---")
@@ -236,3 +266,9 @@ st.sidebar.markdown("""
 2. 调整参数并点击「开始筛选」
 3. 点击结果行查看详情并支持收藏
 """)
+
+# ### 页面底部：处理待触发的弹窗 ###
+if st.session_state.pending_details:
+    code, name = st.session_state.pending_details
+    st.session_state.pending_details = None # 清除信号，防止循环
+    show_stock_details(code, name)
