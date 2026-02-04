@@ -138,9 +138,23 @@ def create_kline_chart(df: pd.DataFrame, title: str = "K线图") -> Grid:
         PyEcharts Grid 对象
     """
     dates = df['日期'].tolist()
-    # 构造 Kline 数据，额外附带涨跌幅用于 Tooltip
-    kline_data = df[['开盘', '收盘', '最低', '最高', '涨跌幅']].values.tolist()
-    volumes = df['成交量'].tolist()
+    # 增强鲁棒性：寻找换手率列
+    turnover_col = None
+    for c in ['换手率', 'turnover_rate', '换手率(%)']:
+        if c in df.columns:
+            turnover_col = c
+            break
+    
+    # 构造 Kline 数据，固定索引以保证 Tooltip 稳定
+    # 索引: 0:日期, 1:开盘, 2:收盘, 3:最低, 4:最高, 5:涨跌幅, 6:换手率
+    df_chart = df.copy()
+    if turnover_col and turnover_col != '换手率':
+        df_chart['换手率'] = df_chart[turnover_col]
+    elif not turnover_col:
+        df_chart['换手率'] = 0 # 垫片数据
+        
+    kline_data = df_chart[['开盘', '收盘', '最低', '最高', '涨跌幅', '换手率']].values.tolist()
+    volumes = df_chart['成交量'].tolist()
     
     # K线主图
     kline = (
@@ -177,12 +191,23 @@ def create_kline_chart(df: pd.DataFrame, title: str = "K线图") -> Grid:
                                     var low = val[3];
                                     var high = val[4];
                                     var pct = val[5];
+                                    var turnover = val[6];
+                                    
                                     var color = close >= open ? '#ef5350' : '#26a69a';
                                     res += '<br/>' + item.marker + ' <b>' + item.seriesName + '</b>:';
                                     res += '<br/>&nbsp;&nbsp;开盘: ' + open + ' &nbsp;&nbsp;收盘: ' + close;
                                     res += '<br/>&nbsp;&nbsp;最低: ' + low + ' &nbsp;&nbsp;最高: ' + high;
+                                    
+                                    var extra = '';
                                     if (pct !== undefined && pct !== null) {
-                                        res += '<br/>&nbsp;&nbsp;涨跌幅: <span style="color:' + color + '">' + pct + '%</span>';
+                                        extra += '涨跌幅: <span style="color:' + color + '">' + pct + '%</span>';
+                                    }
+                                    if (turnover !== undefined && turnover !== null) {
+                                        if (extra) extra += ' &nbsp;&nbsp;';
+                                        extra += '换手率: ' + turnover + '%';
+                                    }
+                                    if (extra) {
+                                        res += '<br/>&nbsp;&nbsp;' + extra;
                                     }
                                 } else {
                                     var val = Array.isArray(item.value) ? item.value[1] : item.value;
