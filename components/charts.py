@@ -5,6 +5,7 @@ import pandas as pd
 from pyecharts import options as opts
 from pyecharts.charts import Pie, Bar, Kline, Line, Grid
 from pyecharts.globals import ThemeType
+from pyecharts.commons.utils import JsCode
 from streamlit.components.v1 import html
 
 
@@ -137,7 +138,8 @@ def create_kline_chart(df: pd.DataFrame, title: str = "K线图") -> Grid:
         PyEcharts Grid 对象
     """
     dates = df['日期'].tolist()
-    kline_data = df[['开盘', '收盘', '最低', '最高']].values.tolist()
+    # 构造 Kline 数据，额外附带涨跌幅用于 Tooltip
+    kline_data = df[['开盘', '收盘', '最低', '最高', '涨跌幅']].values.tolist()
     volumes = df['成交量'].tolist()
     
     # K线主图
@@ -158,7 +160,45 @@ def create_kline_chart(df: pd.DataFrame, title: str = "K线图") -> Grid:
                 opts.DataZoomOpts(is_show=True, type_="slider", xaxis_index=[0, 1], range_start=0, range_end=100, pos_bottom="10%"),
             ],
             legend_opts=opts.LegendOpts(pos_top="5%"),
-            tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
+            tooltip_opts=opts.TooltipOpts(
+                trigger="axis", 
+                axis_pointer_type="cross",
+                formatter=JsCode("""
+                    function (params) {
+                        try {
+                            var res = params[0].name;
+                            for (var i = 0; i < params.length; i++) {
+                                var item = params[i];
+                                var type = item.seriesType || '';
+                                if (type.indexOf('kline') !== -1 || type.indexOf('candlestick') !== -1) {
+                                    var val = item.value;
+                                    var open = val[1];
+                                    var close = val[2];
+                                    var low = val[3];
+                                    var high = val[4];
+                                    var pct = val[5];
+                                    var color = close >= open ? '#ef5350' : '#26a69a';
+                                    res += '<br/>' + item.marker + ' <b>' + item.seriesName + '</b>:';
+                                    res += '<br/>&nbsp;&nbsp;开盘: ' + open + ' &nbsp;&nbsp;收盘: ' + close;
+                                    res += '<br/>&nbsp;&nbsp;最低: ' + low + ' &nbsp;&nbsp;最高: ' + high;
+                                    if (pct !== undefined && pct !== null) {
+                                        res += '<br/>&nbsp;&nbsp;涨跌幅: <span style="color:' + color + '">' + pct + '%</span>';
+                                    }
+                                } else {
+                                    var val = Array.isArray(item.value) ? item.value[1] : item.value;
+                                    if (val !== undefined && val !== null) {
+                                        var displayVal = typeof val === 'number' ? val.toFixed(2) : val;
+                                        res += '<br/>' + item.marker + ' ' + item.seriesName + ': ' + displayVal;
+                                    }
+                                }
+                            }
+                            return res;
+                        } catch (e) {
+                            return 'Tooltip Error';
+                        }
+                    }
+                """)
+            ),
         )
     )
     
