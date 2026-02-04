@@ -33,6 +33,30 @@ class StockService:
         
         # 股票信息缓存
         self._stock_info_cache = None
+        
+        # 确保基础表存在
+        self._init_db()
+
+    def _init_db(self):
+        """初始化必要的数据库表（主要是收藏表）"""
+        if not os.path.exists(self.data_dir):
+            os.makedirs(self.data_dir, exist_ok=True)
+            
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS collected_stocks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    代码 TEXT NOT NULL,
+                    名称 TEXT,
+                    收藏日期 TEXT NOT NULL,
+                    策略名称 TEXT NOT NULL,
+                    备注 TEXT,
+                    UNIQUE(代码, 策略名称)
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_collect_code ON collected_stocks (代码)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_collect_strategy ON collected_stocks (策略名称)')
+            conn.commit()
     
     # ==================== 股票列表 ====================
     
@@ -411,3 +435,81 @@ class StockService:
         if not df.empty:
             df = df.loc[:, ~df.columns.duplicated()]
         return df
+    # ==================== 股票收藏控制 ====================
+    
+    def collect_stock(self, code: str, name: str, rule_name: str, remark: str = "") -> bool:
+        """收藏股票"""
+        if not self._db_exists():
+            return False
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute('''
+                    INSERT OR REPLACE INTO collected_stocks (代码, 名称, 收藏日期, 策略名称, 备注)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (code, name, now, rule_name, remark))
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"收藏股票失败: {e}")
+            return False
+
+    def remove_collected_stock(self, code: str, rule_name: str) -> bool:
+        """取消收藏"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('DELETE FROM collected_stocks WHERE 代码 = ? AND 策略名称 = ?', (code, rule_name))
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"取消收藏失败: {e}")
+            return False
+
+    def get_collected_stocks(self, rule_name: str = None) -> pd.DataFrame:
+        """获取收藏列表"""
+        sql = "SELECT * FROM collected_stocks"
+        params = []
+        if rule_name:
+            sql += " WHERE 策略名称 = ?"
+            params.append(rule_name)
+        
+        sql += " ORDER BY 收藏日期 DESC"
+        df_fav = self._query_db(sql, tuple(params))
+        
+        if df_fav.empty:
+            return df_fav
+            
+        # 尝试关联最新的行情数据（如果有）
+        try:
+            codes = df_fav['代码'].unique().tolist()
+            placeholder = ', '.join(['?'] * len(codes))
+            # 获取每个代码最近的一条记录
+            sql_latest = f'''
+                SELECT d.*, b.名称 as 真实名称, b.行业
+                FROM daily_data d
+                LEFT JOIN stock_basic b ON d.代码 = b.代码
+                WHERE d.代码 IN ({placeholder})
+                AND d.日期 = (SELECT MAX(日期) FROM daily_data)
+            '''
+            df_latest = self._query_db(sql_latest, tuple(codes))
+            
+            if not df_latest.empty:
+                # 合并收藏信息和最新行情
+                res = df_fav.merge(df_latest, on='代码', how='left', suffixes=('', '_latest'))
+                # 补全名称（以 basic 表为准）
+                if '真实名称' in res.columns:
+                    res['名称'] = res['真实名称'].fillna(res['名称'])
+                return res
+        except:
+            pass
+            
+        return df_fav
+
+    def is_collected(self, code: str, rule_name: str) -> bool:
+        """检查是否已收藏"""
+        df = self._query_db(
+            "SELECT 1 FROM collected_stocks WHERE 代码 = ? AND 策略名称 = ?",
+            (code, rule_name)
+        )
+        return not df.empty

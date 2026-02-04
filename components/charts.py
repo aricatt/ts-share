@@ -25,26 +25,40 @@ def create_industry_pie(df: pd.DataFrame, title: str = "行业分布") -> Pie:
     创建行业分布饼图
     
     Args:
-        df: 股票数据，需包含 '所属行业' 列
+        df: 股票数据，需包含 '行业' 列
         title: 图表标题
     
     Returns:
         PyEcharts Pie 对象
     """
-    industry_count = df['所属行业'].value_counts()
+    # 兼容性处理：尝试获取 '行业' 或 '所属行业'
+    col = '行业' if '行业' in df.columns else '所属行业'
+    if col not in df.columns:
+        return Pie() # 返回空图表避免报错
+        
+    industry_count = df[col].value_counts()
     data = [list(z) for z in zip(industry_count.index.tolist(), industry_count.values.tolist())]
     
     pie = (
-        Pie(init_opts=opts.InitOpts(theme=ThemeType.DARK, width="100%", height="400px"))
+        Pie(init_opts=opts.InitOpts(theme=ThemeType.DARK, width="100%", height="500px"))
         .add(
             "",
             data,
-            radius=["40%", "70%"],
-            label_opts=opts.LabelOpts(formatter="{b}: {c} ({d}%)"),
+            radius=["30%", "65%"],
+            center=["50%", "45%"], # 身体稍微上移，给底部图例留空间
+            label_opts=opts.LabelOpts(
+                formatter="{b}: {c}",
+                position="outside"
+            ),
         )
         .set_global_opts(
-            title_opts=opts.TitleOpts(title=title, pos_left="center"),
-            legend_opts=opts.LegendOpts(pos_left="left", orient="vertical"),
+            title_opts=opts.TitleOpts(title=title, pos_left="center", pos_top="0"),
+            legend_opts=opts.LegendOpts(
+                pos_bottom="5%", 
+                pos_left="center", 
+                orient="horizontal",
+                is_show=len(data) < 25 # 如果行业太多（超过25个）就不显示图例以免拥挤
+            ),
         )
     )
     return pie

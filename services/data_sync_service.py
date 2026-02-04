@@ -102,24 +102,37 @@ class DataSyncService:
                 )
             ''')
             
-            # 2. 股票基础信息表
+            # 2. 股票基础信息表 (用于名称关联)
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS stock_basic (
                     代码 TEXT PRIMARY KEY,
                     名称 TEXT,
-                    地区 TEXT,
                     行业 TEXT,
+                    区域 TEXT,
                     市场 TEXT,
-                    上市日期 TEXT,
-                    退市日期 TEXT,
-                    状态 TEXT
+                    上市日期 TEXT
+                )
+            ''')
+
+            # 3. 收藏股票表
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS collected_stocks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    代码 TEXT NOT NULL,
+                    名称 TEXT,
+                    收藏日期 TEXT NOT NULL,
+                    策略名称 TEXT NOT NULL,
+                    备注 TEXT,
+                    UNIQUE(代码, 策略名称)
                 )
             ''')
             
-            # 创建索引加速查询
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_code ON daily_data(代码)')
-            conn.execute('CREATE INDEX IF NOT EXISTS idx_date ON daily_data(日期)')
+            # 创建索引
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_data (日期)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_daily_code ON daily_data (代码)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_pct_chg ON daily_data(涨跌幅)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_collect_code ON collected_stocks (代码)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_collect_strategy ON collected_stocks (策略名称)')
             
             # 动态检查并添加缺失的列（适配已有数据库升级）
             cursor = conn.execute("PRAGMA table_info(daily_data)")

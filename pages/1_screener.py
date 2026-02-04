@@ -63,29 +63,86 @@ for key, config in params.items():
 if 'screener_results' not in st.session_state:
     st.session_state.screener_results = None
 
-# 定义弹窗函数
+# ========== 收藏功能模块 ==========
+
+# 显示当前策略的收藏列表
+def display_collections(rule_name):
+    fav_df = stock_service.get_collected_stocks(rule_name)
+    if not fav_df.empty:
+        with st.expander(f"⭐ 我的收藏 - {rule_name} ({len(fav_df)} 只)", expanded=True):
+            # 格式化展示数据
+            disp_fav = fav_df.copy()
+            if '涨跌幅' in disp_fav.columns:
+                disp_fav['涨跌幅'] = disp_fav['涨跌幅'].astype(float).round(2).astype(str) + '%'
+            if '总市值' in disp_fav.columns:
+                disp_fav['市值(亿)'] = (disp_fav['总市值'] / 10000).round(2)
+            
+            show_cols = [c for c in ['代码', '名称', '涨跌幅', '市值(亿)', '行业', '收藏日期'] if c in disp_fav.columns]
+            
+            # 使用 unique key 避免冲突
+            fav_selected = st.dataframe(
+                disp_fav[show_cols],
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key=f"fav_table_{rule_name}"
+            )
+            
+            if fav_selected and "rows" in fav_selected.selection and len(fav_selected.selection.rows) > 0:
+                row_idx = fav_selected.selection.rows[0]
+                sel_row = disp_fav.iloc[row_idx]
+                show_stock_details(sel_row['代码'], sel_row['名称'])
+
+# 处理收藏逻辑
+def toggle_collection(code, name, rule_name):
+    if stock_service.is_collected(code, rule_name):
+        if stock_service.remove_collected_stock(code, rule_name):
+            st.toast(f"已从【{rule_name}】中移除 {name}")
+            return True
+    else:
+        if stock_service.collect_stock(code, name, rule_name):
+            st.toast(f"已添加到【{rule_name}】收藏")
+            return True
+    return False
+
+# 修订弹窗函数内容
 @st.dialog("股票 K 线预览", width="large")
 def show_stock_details(code, name):
+    # 操作栏
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.subheader(f"{name} ({code})")
+    with col2:
+        is_fav = stock_service.is_collected(code, selected_rule)
+        btn_label = "⭐ 取消收藏" if is_fav else "☆ 添加收藏"
+        if st.button(btn_label, use_container_width=True, type="primary" if not is_fav else "secondary"):
+            if toggle_collection(code, name, selected_rule):
+                st.rerun()
+
     with st.spinner("获取历史行情中..."):
         df_hist = stock_service.get_history(code, days=120)
+    
     if df_hist is not None and not df_hist.empty:
-        kline_chart = create_kline_chart(df_hist, title=name)
+        kline_chart = create_kline_chart(df_hist, title=f"{name} - 最近半年走势")
         render_chart(kline_chart, height=500)
     else:
         st.warning("暂无历史行情数据可供预览")
 
-# 开始筛选按钮
+# 先显示收藏夹
+st.markdown("---")
+display_collections(selected_rule)
+
+# 开始筛选按钮逻辑 ... (保持原样，但确保 selected_rule 是一致的)
 if st.sidebar.button("🚀 开始筛选", type="primary", use_container_width=True):
     with st.spinner("正在筛选股票..."):
         try:
-            # 创建策略实例
             rule_instance = get_rule(selected_rule)
             for key, value in adjusted_params.items():
                 if hasattr(rule_instance, key):
                     if key == 'max_market_cap': value = value * 1e8
                     setattr(rule_instance, key, value)
             
-            # 获取数据并应用策略
             df = stock_service.get_data_by_source(rule_instance.data_source, date_str)
             if df.empty:
                 st.warning("⚠️ 无法获取初始数据")
@@ -96,7 +153,6 @@ if st.sidebar.button("🚀 开始筛选", type="primary", use_container_width=Tr
                 else:
                     result = rule_instance.apply(df, date_str=date_str)
                 
-                # 保存到 session_state
                 st.session_state.screener_results = {
                     "result": result,
                     "total_before": total_before,
@@ -110,75 +166,73 @@ if st.sidebar.button("🚀 开始筛选", type="primary", use_container_width=Tr
             import traceback
             st.code(traceback.format_exc())
 
-# 渲染筛选结果 (如果 session_state 中有数据)
+# 渲染筛选结果
 if st.session_state.screener_results:
     res_data = st.session_state.screener_results
-    result = res_data["result"]
-    
-    st.info(f"📊 策略：{res_data['rule_name']} | 日期：{res_data['date_str']}")
-    result_stats(result, res_data["total_before"])
-    
-    # 步骤跟踪
-    with st.expander("🔍 查看执行步骤跟踪", expanded=False):
-        st.dataframe(res_data["tracker_df"], use_container_width=True, hide_index=True)
-        st.code(res_data["tracker_summary"])
+    # 增加校验：如果 session 中的策略和当前选中的不一致，不显示结果（或者提示）
+    if res_data["rule_name"] == selected_rule:
+        result = res_data["result"]
+        
+        st.info(f"📊 策略：{res_data['rule_name']} | 日期：{res_data['date_str']}")
+        result_stats(result, res_data["total_before"])
+        
+        with st.expander("🔍 查看执行步骤跟踪", expanded=False):
+            st.dataframe(res_data["tracker_df"], use_container_width=True, hide_index=True)
+            st.code(res_data["tracker_summary"])
 
-    st.markdown("---")
-    if not result.empty:
-        st.subheader("📋 筛选结果")
-        
-        # 准备显示数据
-        display_df = result.copy()
-        if '总市值' in display_df.columns:
-            display_df['总市值(亿)'] = (display_df['总市值'] / 10000).round(2)
-        
-        # 统一格式化
-        for col in ['涨跌幅', '换手率']:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].round(2).astype(str) + '%'
-        
-        # 定义显示列
-        view_cols = [c for c in ['代码', '名称', '涨跌幅', '换手率', '总市值(亿)', '所属行业', '连板数'] if c in display_df.columns]
-        display_view = display_df[view_cols]
+        st.markdown("---")
+        if not result.empty:
+            st.subheader("📋 筛选结果")
+            
+            display_df = result.copy()
+            if '总市值' in display_df.columns:
+                display_df['总市值(亿)'] = (display_df['总市值'] / 10000).round(2)
+            
+            for col in ['涨跌幅', '换手率']:
+                if col in display_df.columns:
+                    display_df[col] = display_df[col].round(2).astype(str) + '%'
+            
+            view_cols = [c for c in ['代码', '名称', '涨跌幅', '换手率', '总市值(亿)', '行业', '连板数'] if c in display_df.columns]
+            display_view = display_df[view_cols]
 
-        st.caption("💡 提示：点击下方表格任意行，可弹出 120 日 K 线预览。")
-        
-        # 数据展示与交互
-        selected = st.dataframe(
-            display_view,
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="screener_result_table"
-        )
+            st.caption("💡 提示：点击行查看 K 线，并在弹窗内收藏关注。")
+            
+            selected = st.dataframe(
+                display_view,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="screener_result_table"
+            )
 
-        # 触发弹窗逻辑
-        if selected and "rows" in selected.selection and len(selected.selection.rows) > 0:
-            row_idx = selected.selection.rows[0]
-            sel_row = display_view.iloc[row_idx]
-            show_stock_details(sel_row['代码'], sel_row['名称'])
+            if selected and "rows" in selected.selection and len(selected.selection.rows) > 0:
+                row_idx = selected.selection.rows[0]
+                sel_row = display_view.iloc[row_idx]
+                show_stock_details(sel_row['代码'], sel_row['名称'])
 
         # 图表分析
         st.markdown("---")
-        st.subheader("📊 数据可视化")
-        chart_col1, chart_col2 = st.columns(2)
-        with chart_col1:
-            if '所属行业' in result.columns:
-                st.markdown("#### 🥧 行业分布")
-                render_chart(create_industry_pie(result), height=400)
-        with chart_col2:
-            st.markdown("#### 📊 换手率 TOP 10")
-            render_chart(create_turnover_bar(result), height=400)
+        st.subheader("📊 数据可视化分析")
+        
+        # 1. 行业分布 (单行全宽)
+        if '行业' in result.columns:
+            st.markdown("#### 🥧 行业分布概览")
+            render_chart(create_industry_pie(result), height=500)
+            
+        st.markdown("<br>", unsafe_allow_html=True)
+            
+        # 2. 换手率排行 (单行全宽)
+        st.markdown("#### 📊 换手率 TOP 20")
+        render_chart(create_turnover_bar(result, top_n=20), height=500)
     else:
-        st.warning("😵 选股完成，但没有股票符合条件")
+        st.info("💡 请点击侧边栏的「开始筛选」来获取最新策略结果")
 
 # 使用说明
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 ### 📖 使用说明
-1. 选择日期（默认昨天）
-2. 选择策略
-3. 调整参数（可选）
-4. 点击"开始筛选"
+1. 选择策略，上方自动显示已收藏该策略的股票
+2. 调整参数并点击「开始筛选」
+3. 点击结果行查看详情并支持收藏
 """)
