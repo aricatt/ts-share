@@ -40,6 +40,11 @@ def create_industry_pie(df: pd.DataFrame, title: str = "行业分布") -> Pie:
     industry_count = df[col].value_counts()
     data = [list(z) for z in zip(industry_count.index.tolist(), industry_count.values.tolist())]
     
+    if not data:
+        return Pie(init_opts=opts.InitOpts(theme=ThemeType.DARK)).set_global_opts(
+            title_opts=opts.TitleOpts(title=f"{title} (暂无数据)", pos_left="center")
+        )
+    
     pie = (
         Pie(init_opts=opts.InitOpts(theme=ThemeType.DARK, width="100%", height="500px"))
         .add(

@@ -31,26 +31,20 @@ class RuleDragonPullback(BaseRule):
     def __init__(
         self,
         min_4m_change: float = 50.0,    # 4月最小涨幅
-        max_1m_change: float = -10.0,   # 1月最大跌幅（负数）
+        min_pullback_pct: float = 30.0,  # 1月最小回撤（正数，如30代表跌了30%）
         max_turnover: float = 13.0,
         exclude_exchanges: list = None,
         exclude_st: bool = True,
     ):
         super().__init__()  # 初始化 tracker
         self.min_4m_change = min_4m_change
-        self.max_1m_change = max_1m_change
+        self.min_pullback_pct = min_pullback_pct
         self.max_turnover = max_turnover
         self.exclude_exchanges = exclude_exchanges or ["科创板", "北交所"]
         self.exclude_st = exclude_st
     
     def apply(self, df: pd.DataFrame, history_provider=None, **kwargs) -> pd.DataFrame:
-        """
-        应用策略筛选
-        
-        Args:
-            df: 当日股票数据
-            history_provider: 历史数据获取器，需提供 get_history(code, days) 方法
-        """
+        """应用策略筛选"""
         result = df.copy()
         
         # 开始跟踪
@@ -89,33 +83,11 @@ class RuleDragonPullback(BaseRule):
             return result
         
         # 4. 逐只股票检查历史条件
-        # 现在利用数据库中的预算指标进行加速
         valid_codes = []
-        trade_date = kwargs.get('date_str')
-        
-        # 批量获取所有候选股的历史收盘价（用于计算涨幅和回落）
         for _, row in result.iterrows():
             code = row['代码']
             try:
-                # 优先检查当前行的 DB 指标（如果存在）
-                has_db_indicators = all(k in row for k in ['ma20', 'ma60', 'vma5', 'qfq_收盘'])
-                
-                if has_db_indicators:
-                    # 直接用现有列做初步排除，减少 get_history 调用
-                    latest_close = row['qfq_收盘']
-                    # 1. 位置判断：MA60 < 收盘 < MA20
-                    if latest_close <= row['ma60'] or latest_close >= row['ma20']:
-                        continue
-                    
-                    # 2. 距离判断：距离MA60更近
-                    if (latest_close - row['ma60']) >= (row['ma20'] - latest_close):
-                        continue
-                        
-                    # 3. 缩量判断
-                    if row['成交量'] >= row['vma5']:
-                        continue
-                
-                # 4. 剩下的再查历史算涨幅
+                # 剩下的再查历史算涨幅
                 hist = history_provider.get_history(code, self.history_days)
                 if hist is not None and self._check_history_conditions(hist):
                     valid_codes.append(code)
@@ -127,7 +99,7 @@ class RuleDragonPullback(BaseRule):
         self.tracker.record(
             "满足龙回头特征",
             result,
-            f"4月涨>{self.min_4m_change}%, 1月跌>{abs(self.max_1m_change)}%, 缩量且更靠近MA60"
+            f"4月涨>{self.min_4m_change}%, 1月由高点回撤>{self.min_pullback_pct}%, 缩量且靠近MA60"
         )
         
         return result
@@ -137,11 +109,11 @@ class RuleDragonPullback(BaseRule):
         if len(hist) < 60:  # 至少需要60天数据
             return False
         
-        # 使用前复权价格计算（避免除权干扰）
+        # 使用前复权价格计算
         price_col = 'qfq_收盘' if 'qfq_收盘' in hist.columns else '收盘'
         high_col = 'qfq_最高' if 'qfq_最高' in hist.columns else '最高'
         
-        # 1. 近4月涨幅 > 50% (约 80 交易日)
+        # 1. 近4月涨幅 > 50%
         price_now = hist[price_col].iloc[-1]
         idx_4m = max(0, len(hist) - 81)
         price_4m_ago = hist[price_col].iloc[idx_4m]
@@ -150,13 +122,14 @@ class RuleDragonPullback(BaseRule):
         if change_4m < self.min_4m_change:
             return False
         
-        # 2. 自近1月高点回落 > 10%
+        # 2. 自近1月高点回撤检查
         idx_1m = max(0, len(hist) - 21)
         recent_hist = hist.iloc[idx_1m:]
         max_price_1m = recent_hist[high_col].max()
-        drop_1m = (price_now / max_price_1m - 1) * 100 if max_price_1m > 0 else 0
+        # 回撤计算: (1 - 现价/最高价) * 100
+        pullback_pct = (1 - price_now / max_price_1m) * 100 if max_price_1m > 0 else 0
         
-        if drop_1m > self.max_1m_change: # max_1m_change 为 -10.0
+        if pullback_pct < self.min_pullback_pct:
             return False
         
         # 3. 收盘价位置：MA60 < 收盘 < MA20
@@ -167,11 +140,11 @@ class RuleDragonPullback(BaseRule):
         if price_now <= ma60 or price_now >= ma20:
             return False
             
-        # 3b. 距离更近判断：距离MA60更近
+        # 3b. 距离更近判断
         if (price_now - ma60) >= (ma20 - price_now):
             return False
         
-        # 4. 缩量检查：当前成交量 < 5日均量
+        # 4. 缩量检查
         vma5 = latest['vma5'] if 'vma5' in latest and pd.notnull(latest['vma5']) else calc_volume_ma(hist, 5).iloc[-1]
         if latest['成交量'] >= vma5:
             return False
@@ -181,9 +154,9 @@ class RuleDragonPullback(BaseRule):
     def get_params(self):
         """获取策略参数"""
         return {
-            "min_4m_change": {"label": "4月最小涨幅(%)", "value": self.min_4m_change, "type": "float"},
-            "max_1m_change": {"label": "1月最大跌幅(%)", "value": self.max_1m_change, "type": "float"},
-            "max_turnover": {"label": "最大换手率(%)", "value": self.max_turnover, "type": "float"},
-            "exclude_exchanges": {"label": "排除板块", "value": self.exclude_exchanges, "type": "list"},
+            "min_4m_change": {"label": "4月最小涨幅(%)", "value": self.min_4m_change, "type": "float", "min": 20, "max": 200},
+            "min_pullback_pct": {"label": "1月最小回撤(%)", "value": self.min_pullback_pct, "type": "float", "min": 5, "max": 100.0, "step": 1.0},
+            "max_turnover": {"label": "最大换手率(%)", "value": self.max_turnover, "type": "float", "min": 5, "max": 30},
+            "exclude_exchanges": {"label": "排除板块", "value": self.exclude_exchanges, "type": "list", "options": ["创业板", "科创板", "北交所"]},
             "exclude_st": {"label": "排除ST", "value": self.exclude_st, "type": "bool"},
         }
