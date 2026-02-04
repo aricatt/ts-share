@@ -2,15 +2,13 @@
 策略：龙回头 (Dragon Pullback)
 
 筛选条件：
-- 近4个月涨幅 > 50%
-- 近1个月跌幅 > 10%
-- 收盘价 > 60日均线
-- 收盘价 < 20日均线
-- 成交量 < 5日均量线
+- 进四个月涨幅超过50%
+- 近一个月内跌幅超过10%
+- 收盘价在60日均线之上，且在20日均线之下
+- 收盘价距离60日均线更近（更靠近支撑位）
+- 成交量小于5日均量线
 - 换手率 < 13%
-- 非ST
-- 非科创板
-- 非北交所
+- 非ST，非科创板，非北交所
 """
 import pandas as pd
 from .base import BaseRule
@@ -23,7 +21,7 @@ class RuleDragonPullback(BaseRule):
     """龙回头策略"""
     
     name = "龙回头"
-    description = "曾涨停后回调，4月涨50%后回调，站上MA60但在MA20下"
+    description = "曾涨停后回调，4月涨50%后回调，站上MA60但在MA20下，且靠近MA60"
     # 使用历史涨停股池作为初始筛选池
     # 龙回头是捕捉曾经强势但现在回调稳定的股票
     data_source = "historical_zt"
@@ -96,23 +94,28 @@ class RuleDragonPullback(BaseRule):
         trade_date = kwargs.get('date_str')
         
         # 批量获取所有候选股的历史收盘价（用于计算涨幅和回落）
-        # 这里为了演示，我们先按照之前的逻辑优化：如果能从 DB 拿指标就直接用
         for _, row in result.iterrows():
             code = row['代码']
             try:
                 # 优先检查当前行的 DB 指标（如果存在）
-                # 注意：如果 df 是实时行情，可能没有这些列，逻辑会回退到 get_history
                 has_db_indicators = all(k in row for k in ['ma20', 'ma60', 'vma5', 'qfq_收盘'])
                 
                 if has_db_indicators:
                     # 直接用现有列做初步排除，减少 get_history 调用
                     latest_close = row['qfq_收盘']
+                    # 1. 位置判断：MA60 < 收盘 < MA20
                     if latest_close <= row['ma60'] or latest_close >= row['ma20']:
                         continue
+                    
+                    # 2. 距离判断：距离MA60更近
+                    if (latest_close - row['ma60']) >= (row['ma20'] - latest_close):
+                        continue
+                        
+                    # 3. 缩量判断
                     if row['成交量'] >= row['vma5']:
                         continue
                 
-                # 剩下的再查历史算涨幅
+                # 4. 剩下的再查历史算涨幅
                 hist = history_provider.get_history(code, self.history_days)
                 if hist is not None and self._check_history_conditions(hist):
                     valid_codes.append(code)
@@ -124,7 +127,7 @@ class RuleDragonPullback(BaseRule):
         self.tracker.record(
             "满足龙回头特征",
             result,
-            f"4月涨>{self.min_4m_change}%, 1月跌>{abs(self.max_1m_change)}%, 缩量站稳MA60"
+            f"4月涨>{self.min_4m_change}%, 1月跌>{abs(self.max_1m_change)}%, 缩量且更靠近MA60"
         )
         
         return result
@@ -157,12 +160,15 @@ class RuleDragonPullback(BaseRule):
             return False
         
         # 3. 收盘价位置：MA60 < 收盘 < MA20
-        # 优先使用预计算的均线
         latest = hist.iloc[-1]
         ma60 = latest['ma60'] if 'ma60' in latest and pd.notnull(latest['ma60']) else calc_ma(hist, 60).iloc[-1]
         ma20 = latest['ma20'] if 'ma20' in latest and pd.notnull(latest['ma20']) else calc_ma(hist, 20).iloc[-1]
         
         if price_now <= ma60 or price_now >= ma20:
+            return False
+            
+        # 3b. 距离更近判断：距离MA60更近
+        if (price_now - ma60) >= (ma20 - price_now):
             return False
         
         # 4. 缩量检查：当前成交量 < 5日均量
