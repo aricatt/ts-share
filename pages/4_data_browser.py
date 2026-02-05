@@ -195,8 +195,8 @@ else:
     st.session_state['last_selected_code'] = search_code
     selected_option = selected_label # 用于后续展示
     
-    # 最近 N 天
-    history_days = st.sidebar.slider("查看天数", min_value=5, max_value=365, value=60)
+    # 查看天数（默认显示1年约250个交易日，最大支持约3年）
+    history_days = st.sidebar.slider("查看天数 (交易日)", min_value=5, max_value=750, value=250)
     
     # 复权选项
     adj_type = st.sidebar.selectbox("复权方式", options=["前复权", "未复权"])

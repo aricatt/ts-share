@@ -148,10 +148,10 @@ def show_stock_details(code, name):
                 st.rerun()
 
     with st.spinner("获取历史行情中..."):
-        df_hist = stock_service.get_history(code, days=120)
+        df_hist = stock_service.get_history(code, days=250)
     
     if df_hist is not None and not df_hist.empty:
-        kline_chart = create_kline_chart(df_hist, title=f"{name} - 最近半年走势")
+        kline_chart = create_kline_chart(df_hist, title=f"{name} - 最近一年走势")
         render_chart(kline_chart, height=500)
     else:
         st.warning("暂无历史行情数据可供预览")
