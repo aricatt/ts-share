@@ -88,6 +88,44 @@ class StockService:
             print(f"获取股票列表失败: {e}")
             return pd.DataFrame()
     
+    def search_stocks(self, query: str, limit: int = 10) -> pd.DataFrame:
+        """
+        模糊搜索股票（按代码或名称）
+        
+        Args:
+            query: 搜索关键词
+            limit: 返回结果数量限制
+            
+        Returns:
+            满足条件的股票基本信息 DataFrame
+        """
+        if not query:
+            return pd.DataFrame()
+            
+        # 1. 优先尝试从本地数据库搜索
+        if self._db_exists():
+            sql = '''
+                SELECT 代码, 名称, 行业, 市场
+                FROM stock_basic
+                WHERE 代码 LIKE ? OR 名称 LIKE ?
+                LIMIT ?
+            '''
+            like_query = f"%{query}%"
+            df = self._query_db(sql, (like_query, like_query, limit))
+            if not df.empty:
+                return df
+                
+        # 2. 如果数据库没有或没搜到，尝试从在线列表搜
+        df_list = self.get_stock_list()
+        if not df_list.empty:
+            # 过滤
+            mask = df_list['symbol'].str.contains(query, case=False) | df_list['name'].str.contains(query, case=False)
+            df_match = df_list[mask].head(limit).copy()
+            if not df_match.empty:
+                return df_match.rename(columns={'symbol': '代码', 'name': '名称', 'industry': '行业', 'market': '市场'})
+                
+        return pd.DataFrame()
+
     def _to_ts_code(self, code: str) -> str:
         """将6位代码转换为 tushare 格式"""
         if '.' in code:

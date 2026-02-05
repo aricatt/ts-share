@@ -151,8 +151,49 @@ if view_mode == "全市场快照":
 else:
     st.sidebar.header("🔍 个股历史筛选")
     
-    # 股票代码输入
-    search_code = st.sidebar.text_input("股票代码", value="000001", max_chars=6)
+    # 股票搜寻
+    search_keyword = st.sidebar.text_input("搜索股票 (代码或名称)", value="000001", key="stock_search_input", help="支持代码模糊或名称模糊查询，如：'万科' 或 '000002'")
+    
+    # 执行搜索
+    search_results = stock_service.search_stocks(search_keyword, limit=20)
+    
+    if search_results.empty:
+        st.sidebar.error("🚫 未搜到相关股票")
+        st.stop()
+        
+    # 构造更稳定的选项列表
+    # 使用 字典 来存储 代码 -> 显示文字 的映射，方便反查
+    stock_options = {}
+    for _, row in search_results.iterrows():
+        label = f"{row['代码']} - {row['名称']}"
+        if pd.notnull(row['行业']):
+            label += f" ({row['行业']})"
+        stock_options[row['代码']] = label
+    
+    # 获取选项列表
+    labels = list(stock_options.values())
+    
+    # 查找当前选中项在列表中的索引
+    current_idx = 0
+    if 'last_selected_code' in st.session_state:
+        target_code = st.session_state['last_selected_code']
+        # 如果当前搜索结果里包含上次选中的代码，则保持选中
+        for i, code in enumerate(stock_options.keys()):
+            if code == target_code:
+                current_idx = i
+                break
+    
+    selected_label = st.sidebar.selectbox(
+        "选择匹配结果", 
+        options=labels, 
+        index=current_idx,
+        key="stock_search_select"
+    )
+    
+    # 解析选中的代码并存入 state
+    search_code = selected_label.split(" - ")[0]
+    st.session_state['last_selected_code'] = search_code
+    selected_option = selected_label # 用于后续展示
     
     # 最近 N 天
     history_days = st.sidebar.slider("查看天数", min_value=5, max_value=365, value=60)
@@ -161,7 +202,7 @@ else:
     adj_type = st.sidebar.selectbox("复权方式", options=["前复权", "未复权"])
     
     # 查询
-    with st.spinner(f"正在获取 {search_code} 的历史数据..."):
+    with st.spinner(f"正在获取 {selected_option} 的历史数据..."):
         df_history = stock_service.get_history(search_code, days=history_days)
         # 移除重复列名
         if df_history is not None and not df_history.empty:
