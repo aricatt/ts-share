@@ -10,6 +10,7 @@ from rules import get_rule, get_all_rules
 from components.charts import render_chart, create_industry_pie, create_turnover_bar, create_market_cap_bar, create_kline_chart
 from components.widgets import result_stats
 from config import MARKET_CAP_UNIT
+from agents.analyst_agent import StockAnalystAgent
 
 # 页面配置
 st.set_page_config(page_title="选股器 - TS-Share", page_icon="📊", layout="wide")
@@ -147,11 +148,12 @@ def show_stock_details(code, name):
             if toggle_collection(code, name, selected_rule):
                 st.rerun()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 K线走势", "📊 财务指标", "💰 资金流向", "📢 重要公告"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 K线走势", "📊 财务指标", "💰 资金流向", "📢 重要公告", "🤖 AI 智能诊断"])
 
     ts_code = stock_service._to_ts_code(code)
 
     with tab1:
+        # ... (K线保持不变)
         with st.spinner("获取历史行情中..."):
             df_hist = stock_service.get_history(code, days=250)
         
@@ -162,6 +164,7 @@ def show_stock_details(code, name):
             st.warning("暂无历史行情数据")
 
     with tab2:
+        # ... (财务保持不变)
         st.markdown("#### 财务关键指标")
         with st.spinner("获取财务数据中..."):
             df_fina = stock_service.get_fundamental(ts_code, 'fina_indicator')
@@ -188,6 +191,7 @@ def show_stock_details(code, name):
             st.info("💡 未获取到财务数据（可能权限不足或获取失败）")
 
     with tab3:
+        # ... (资金保持不变)
         st.markdown("#### 最近资金流向")
         with st.spinner("获取资金流向中..."):
             # 获取最近一天的资金流（如果当天没收盘，接口会向前自动找最近的一个有数据的日子）
@@ -214,23 +218,12 @@ def show_stock_details(code, name):
             cols = [c for c in money_cols.keys() if c in df_money.columns]
             df_display = df_money[cols].rename(columns=money_cols).T
             df_display.columns = ['金额 (万元)']
-            
-            # 简单着色处理
-            def highlight_net(val):
-                color = 'red' if val > 0 else 'green'
-                return f'color: {color}; font-weight: bold'
-            
             st.table(df_display)
         else:
             st.warning("⚠️ 未能获取到资金流向数据")
-            st.info("""
-            **可能原因：**
-            1. **权限不足**：Tushare 资金流接口通常需要 2000 积分。
-            2. **网络超时**：API 请求失败。
-            3. **数据未发布**：即使回溯 5 天也未找到数据。
-            """)
 
     with tab4:
+        # ... (公告保持不变)
         st.markdown("#### 📢 最近 30 天重要新闻与公告")
         with st.spinner("获取数据中..."):
             df_news = stock_service.get_stock_news(ts_code, days=30)
@@ -260,6 +253,23 @@ def show_stock_details(code, name):
             st.caption("提示：AI 助手可在后续分析中自动调取并阅读新闻正文")
         else:
             st.info("💡 最近 30 天暂无重要公告或权限受限")
+
+    with tab5:
+        st.markdown("#### 🤖 AutoGen 智能深度诊断")
+        st.info("AI 将综合量价走势、财务状况、资金流向及最新消息给出独立第三方分析意见。")
+        
+        # 放置一个开始按钮
+        if st.button("🚀 开始 AI 诊断 (消耗 Token)", key=f"ai_btn_{code}"):
+            analyst = StockAnalystAgent(stock_service)
+            with st.spinner("🧠 资深分析师正在思考中，请稍候..."):
+                try:
+                    report = analyst.analyze_stock(code)
+                    st.markdown("---")
+                    st.markdown("### 📝 AI 诊断报告")
+                    st.markdown(report)
+                except Exception as e:
+                    st.error(f"AI 分析失败: {str(e)}")
+                    st.info("提示：请检查 agents/config.py 中的 API Key 是否配置正确。")
 
 # 先显示收藏夹
 st.markdown("---")

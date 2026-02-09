@@ -129,6 +129,29 @@ class StockService:
                 
         return pd.DataFrame()
 
+    def get_stock_name(self, code: str) -> str:
+        """根据代码获取股票名称"""
+        if not code:
+            return "未知"
+            
+        # 1. 优先从内存缓存找
+        df_list = self.get_stock_list()
+        if not df_list.empty:
+            # 去掉后缀
+            symbol = code.split('.')[0]
+            match = df_list[df_list['symbol'] == symbol]
+            if not match.empty:
+                return match.iloc[0]['name']
+                
+        # 2. 从本地数据库找
+        if self._db_exists():
+            sql = "SELECT 名称 FROM stock_basic WHERE 代码 = ? LIMIT 1"
+            df = self._query_db(sql, (code.split('.')[0],))
+            if not df.empty:
+                return df.iloc[0]['名称']
+                
+        return code
+
     def _to_ts_code(self, code: str) -> str:
         """将6位代码转换为 tushare 格式"""
         if '.' in code:
@@ -692,3 +715,36 @@ class StockService:
             print(f"⚠️ AkShare 获取新闻受限或失败 ({symbol}): {e}")
             
         return None
+
+    def get_ai_analysis_data(self, code: str) -> dict:
+        """
+        为 AI 代理聚合所有维度的分析报告数据
+        """
+        ts_code = self._to_ts_code(code)
+        last_date = self.get_last_trading_day()
+        
+        # 1. 基础行情（最近 10 天）
+        hist = self.get_history(code, days=10)
+        hist_data = hist.to_dict('records') if hist is not None else []
+        
+        # 2. 财务指标
+        fina = self.get_fundamental(ts_code, 'fina_indicator')
+        fina_data = fina.iloc[0].to_dict() if fina is not None and not fina.empty else {}
+        
+        # 3. 资金流向（最近一天）
+        money = self.get_money_flow_cached(ts_code, last_date)
+        money_data = money.iloc[0].to_dict() if money is not None and not money.empty else {}
+        
+        # 4. 最新消息
+        news = self.get_stock_news(ts_code, days=15)
+        news_list = news['title'].tolist() if news is not None and not news.empty else []
+        
+        return {
+            "ts_code": ts_code,
+            "stock_name": self.get_stock_name(code),
+            "date": last_date,
+            "recent_prices": hist_data,
+            "key_financials": fina_data,
+            "money_flow": money_data,
+            "latest_news": news_list[:10] # 取最新的 10 条
+        }
