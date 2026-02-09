@@ -11,6 +11,7 @@ from components.charts import render_chart, create_industry_pie, create_turnover
 from components.widgets import result_stats
 from config import MARKET_CAP_UNIT
 from agents.analyst_agent import StockAnalystAgent
+from components.stock_details import show_stock_details
 
 # 页面配置
 st.set_page_config(page_title="选股器 - TS-Share", page_icon="📊", layout="wide")
@@ -25,7 +26,7 @@ stock_service = StockService(use_cache=True)
 st.sidebar.header("🔍 筛选参数")
 
 # 日期选择
-default_date = datetime.now() - timedelta(days=1)
+default_date = datetime.now()
 selected_date = st.sidebar.date_input("选择日期", value=default_date)
 date_str = selected_date.strftime("%Y%m%d")
 
@@ -133,143 +134,6 @@ def toggle_collection(code, name, rule_name):
             st.toast(f"已添加到【{rule_name}】收藏")
             return True
     return False
-
-# 修订弹窗函数内容
-@st.dialog("股票详情", width="large")
-def show_stock_details(code, name):
-    # 操作栏
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.subheader(f"{name} ({code})")
-    with col2:
-        is_fav = stock_service.is_collected(code, selected_rule)
-        btn_label = "⭐ 取消收藏" if is_fav else "☆ 添加收藏"
-        if st.button(btn_label, use_container_width=True, type="primary" if not is_fav else "secondary"):
-            if toggle_collection(code, name, selected_rule):
-                st.rerun()
-
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 K线走势", "📊 财务指标", "💰 资金流向", "📢 重要公告", "🤖 AI 智能诊断"])
-
-    ts_code = stock_service._to_ts_code(code)
-
-    with tab1:
-        # ... (K线保持不变)
-        with st.spinner("获取历史行情中..."):
-            df_hist = stock_service.get_history(code, days=250)
-        
-        if df_hist is not None and not df_hist.empty:
-            kline_chart = create_kline_chart(df_hist, title=f"{name} - 最近一年走势")
-            render_chart(kline_chart, height=500)
-        else:
-            st.warning("暂无历史行情数据")
-
-    with tab2:
-        # ... (财务保持不变)
-        st.markdown("#### 财务关键指标")
-        with st.spinner("获取财务数据中..."):
-            df_fina = stock_service.get_fundamental(ts_code, 'fina_indicator')
-            
-        if df_fina is not None and not df_fina.empty:
-            # 选取一些关键字段展示
-            key_cols = {
-                'end_date': '报告期',
-                'eps': '每股收益',
-                'roe': '净资产收益率(%)',
-                'netprofit_margin': '销售净利率(%)',
-                'grossprofit_margin': '销售毛利率(%)',
-                'debt_to_assets': '资产负债率(%)',
-                'bps': '每股净资产',
-                'netprofit_yoy': '净利润增长率(%)',
-                'tr_yoy': '营收增长率(%)'
-            }
-            # 过滤存在的列
-            cols = [c for c in key_cols.keys() if c in df_fina.columns]
-            df_display = df_fina[cols].rename(columns=key_cols)
-            st.dataframe(df_display.head(10), use_container_width=True, hide_index=True)
-            st.caption("注：数据来源 Tushare，缓存于 analysis_cache.db")
-        else:
-            st.info("💡 未获取到财务数据（可能权限不足或获取失败）")
-
-    with tab3:
-        # ... (资金保持不变)
-        st.markdown("#### 最近资金流向")
-        with st.spinner("获取资金流向中..."):
-            # 获取最近一天的资金流（如果当天没收盘，接口会向前自动找最近的一个有数据的日子）
-            last_date = stock_service.get_last_trading_day()
-            df_money = stock_service.get_money_flow_cached(ts_code, last_date)
-            
-        if df_money is not None and not df_money.empty:
-            # 获取实际的数据日期（可能因为还没收盘，展示的是前一天的）
-            actual_date = df_money['_actual_date'].iloc[0] if '_actual_date' in df_money.columns else "未知"
-            st.info(f"📅 数据日期: {actual_date} (注：当日资金流通常在收盘后 18:00 左右发布)")
-            
-            # 展示资金流详情
-            money_cols = {
-                'buy_sm_amount': '小单买入',
-                'sell_sm_amount': '小单卖出',
-                'buy_md_amount': '中单买入',
-                'sell_md_amount': '中单卖出',
-                'buy_lg_amount': '大单买入',
-                'sell_lg_amount': '大单卖出',
-                'buy_elg_amount': '特大单买入',
-                'sell_elg_amount': '特大单卖出',
-                'net_mf_amount': '净流入额'
-            }
-            cols = [c for c in money_cols.keys() if c in df_money.columns]
-            df_display = df_money[cols].rename(columns=money_cols).T
-            df_display.columns = ['金额 (万元)']
-            st.table(df_display)
-        else:
-            st.warning("⚠️ 未能获取到资金流向数据")
-
-    with tab4:
-        # ... (公告保持不变)
-        st.markdown("#### 📢 最近 30 天重要新闻与公告")
-        with st.spinner("获取数据中..."):
-            df_news = stock_service.get_stock_news(ts_code, days=30)
-        
-        if df_news is not None and not df_news.empty:
-            for _, row in df_news.iterrows():
-                with st.container():
-                    # 标题与日期
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.markdown(f"**{row.get('title', '无标题')}**")
-                    with col2:
-                        st.caption(f"📅 {row.get('ann_date', 'N/A')}")
-                    
-                    # 来源与链接
-                    source = row.get('ann_type', '互联网')
-                    url = row.get('url', '#')
-                    
-                    c1, c2 = st.columns([4, 1])
-                    with c1:
-                        st.caption(f"来源: {source}")
-                    with c2:
-                        if url != '#':
-                            st.markdown(f"[🔗 查看详情]({url})")
-                    
-                    st.divider()
-            st.caption("提示：AI 助手可在后续分析中自动调取并阅读新闻正文")
-        else:
-            st.info("💡 最近 30 天暂无重要公告或权限受限")
-
-    with tab5:
-        st.markdown("#### 🤖 AutoGen 智能深度诊断")
-        st.info("AI 将综合量价走势、财务状况、资金流向及最新消息给出独立第三方分析意见。")
-        
-        # 放置一个开始按钮
-        if st.button("🚀 开始 AI 诊断 (消耗 Token)", key=f"ai_btn_{code}"):
-            analyst = StockAnalystAgent(stock_service)
-            with st.spinner("🧠 资深分析师正在思考中，请稍候..."):
-                try:
-                    report = analyst.analyze_stock(code)
-                    st.markdown("---")
-                    st.markdown("### 📝 AI 诊断报告")
-                    st.markdown(report)
-                except Exception as e:
-                    st.error(f"AI 分析失败: {str(e)}")
-                    st.info("提示：请检查 agents/config.py 中的 API Key 是否配置正确。")
 
 # 先显示收藏夹
 st.markdown("---")
@@ -386,4 +250,4 @@ st.sidebar.markdown("""
 if st.session_state.pending_details:
     code, name = st.session_state.pending_details
     st.session_state.pending_details = None # 清除信号，防止循环
-    show_stock_details(code, name)
+    show_stock_details(code, name, stock_service)

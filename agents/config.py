@@ -13,6 +13,6 @@ LLM_CONFIG = {
             "api_type": "openai",
         }
     ],
-    "cache_seed": 42,
+    "cache_seed": None, # 设为 None 禁用本地缓存，确保每次点击都是实时分析
     "temperature": 0.1, # 保持严谨，不乱猜
 }

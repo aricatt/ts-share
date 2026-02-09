@@ -124,19 +124,19 @@ def filter_by_limit_up(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
         
+    # 判定标准：为了兼容低价股精度导致的 9.9x% 涨停，放宽到 9.8%
     # 默认阈值为 10cm (主板)
-    thresholds = pd.Series(9.9, index=df.index)
+    thresholds = pd.Series(9.8, index=df.index)
     
     if '代码' in df.columns:
         # 创业板(30) 和 科创板(688) 为 20cm
-        # 注意：创业板包含 300, 301 等开头的代码
-        thresholds.loc[df['代码'].str.startswith(('30', '688'))] = 19.9
+        thresholds.loc[df['代码'].str.startswith(('30', '688'))] = 19.8
         # 北交所 (8/4/9) 为 30cm
-        thresholds.loc[df['代码'].str.startswith(('8', '4', '9'))] = 29.9
+        thresholds.loc[df['代码'].str.startswith(('8', '4', '9'))] = 29.8
         
     if '名称' in df.columns:
         # ST 股为 5cm
-        thresholds.loc[df['名称'].str.contains('ST', case=False, na=False)] = 4.9
+        thresholds.loc[df['名称'].str.contains('ST', case=False, na=False)] = 4.8
     
     return df[df['涨跌幅'] >= thresholds]
 

@@ -460,11 +460,32 @@ class StockService:
                 date = datetime.now().strftime("%Y%m%d")
             return self.get_zt_pool(date)
         elif source == "all_stocks":
+            # 如果提供了日期，优先从本地数据库获取全量数据
+            if date:
+                df_db = self.get_daily_all(date)
+                if not df_db.empty:
+                    return df_db
+            # 否则尝试实时列表（兜底）
             return self.get_realtime_quotes()
         elif source == "historical_zt":
             return self.get_historical_zt_stocks(date=date, days=90)
         else:
             raise ValueError(f"未知数据源类型: {source}")
+
+    def get_daily_all(self, date: str) -> pd.DataFrame:
+        """从本地数据库获取指定日期的全量股票数据记录"""
+        if not self._db_exists():
+            return pd.DataFrame()
+            
+        sql = '''
+            SELECT b.名称, d.*, b.行业, b.市场
+            FROM daily_data d
+            LEFT JOIN stock_basic b ON d.代码 = b.代码
+            WHERE d.日期 = ?
+            ORDER BY d.涨跌幅 DESC
+        '''
+        df = self._query_db(sql, (date,))
+        return df
     
     def get_historical_zt_stocks(self, date: str = None, days: int = 90) -> pd.DataFrame:
         """获取历史涨停过的股票极其目标日期的行情"""

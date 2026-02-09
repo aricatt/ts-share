@@ -109,14 +109,92 @@ class AnalysisCacheService:
                     PRIMARY KEY (ts_code, query_hash)
                 )
             ''')
+
+            # AI 分析历史记录表（同一只股票同一天只保留一条最新记录）
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS ai_analysis_history (
+                    ts_code TEXT NOT NULL,
+                    analysis_date TEXT NOT NULL,
+                    report TEXT NOT NULL,
+                    model_name TEXT,
+                    created_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (ts_code, analysis_date)
+                )
+            ''')
             
-            # 创建过期时间索引，方便清理
+            # 创建索引
             conn.execute('CREATE INDEX IF NOT EXISTS idx_fundamental_expires ON fundamental_cache (expires_at)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_money_flow_expires ON money_flow_cache (expires_at)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_daily_basic_expires ON daily_basic_cache (expires_at)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_news_expires ON news_cache (expires_at)')
             
             conn.commit()
+
+    # ==================== AI 分析历史记录 ====================
+
+    def save_ai_analysis(self, ts_code: str, report: str, model_name: str = None) -> bool:
+        """保存 AI 分析报告（覆盖当日旧记录）"""
+        try:
+            now = datetime.now()
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    INSERT OR REPLACE INTO ai_analysis_history (ts_code, analysis_date, report, model_name, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (ts_code, now.strftime("%Y-%m-%d"), report, model_name, now.isoformat()))
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"保存 AI 分析报告失败: {e}")
+            return False
+
+    def get_ai_analysis_history(self, ts_code: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """获取个股的 AI 分析历史"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute('''
+                    SELECT report, model_name, analysis_date, created_at 
+                    FROM ai_analysis_history 
+                    WHERE ts_code = ? 
+                    ORDER BY analysis_date DESC 
+                    LIMIT ?
+                ''', (ts_code, limit))
+                results = []
+                for row in cursor.fetchall():
+                    results.append({
+                        "report": row[0],
+                        "model_name": row[1],
+                        "analysis_date": row[2],
+                        "created_at": row[3]
+                    })
+                return results
+        except Exception as e:
+            print(f"读取 AI 分析历史失败: {e}")
+            return []
+
+    def delete_ai_analysis(self, ts_code: str, analysis_date: str) -> bool:
+        """删除特定一天的分析记录"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    DELETE FROM ai_analysis_history 
+                    WHERE ts_code = ? AND analysis_date = ?
+                ''', (ts_code, analysis_date))
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"删除 AI 分析记录失败: {e}")
+            return False
+
+    def clear_ai_analysis_history(self, ts_code: str) -> bool:
+        """清空个股所有分析历史"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('DELETE FROM ai_analysis_history WHERE ts_code = ?', (ts_code,))
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"清空 AI 分析历史失败: {e}")
+            return False
     
     # ==================== 基本面数据缓存 ====================
     

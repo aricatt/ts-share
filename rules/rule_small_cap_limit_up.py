@@ -34,6 +34,8 @@ class RuleSmallCapLimitUp(BaseRule):
     description = "涨停板 + 非一字板 + 换手率<10% + 非创/科/北/ST + 市值<100亿 + 价格由于均线偏离"
     
     # 该策略需要检查历史均线，建议开启历史数据
+    # 回归使用 zt_pool，效率更高，配合 9.8% 阈值不再漏掉特定个股
+    data_source = "zt_pool"
     requires_history = True
     history_days = 100  # 用于计算 MA60 等
     
@@ -45,6 +47,7 @@ class RuleSmallCapLimitUp(BaseRule):
         ma_dist_pct: float = 5.0,       # 偏离比例
         exclude_exchanges: list = None,
         exclude_st: bool = True,
+        exclude_one_word: bool = False, # 默认改为 False，方便用户看到所有涨停，包括一字
     ):
         super().__init__()  # 初始化 tracker
         self.max_turnover = max_turnover
@@ -53,6 +56,7 @@ class RuleSmallCapLimitUp(BaseRule):
         self.ma_dist_pct = ma_dist_pct
         self.exclude_exchanges = exclude_exchanges or ["创业板", "科创板", "北交所"]
         self.exclude_st = exclude_st
+        self.exclude_one_word = exclude_one_word
     
     def apply(self, df: pd.DataFrame, history_provider=None, **kwargs) -> pd.DataFrame:
         """应用策略筛选，带步骤跟踪"""
@@ -69,13 +73,14 @@ class RuleSmallCapLimitUp(BaseRule):
             "自动识别板块涨停阈值 (主板10%/创科20%/北30%/ST5%)"
         )
         
-        # 1.5. 非一字板筛选
-        result = filter_by_not_one_word(result)
-        self.tracker.record(
-            "非一字板筛选",
-            result,
-            "排除开盘价等于收盘价的个股"
-        )
+        # 1.5. 非一字板筛选 (改为可选)
+        if self.exclude_one_word:
+            result = filter_by_not_one_word(result)
+            self.tracker.record(
+                "非一字板筛选",
+                result,
+                "排除开盘价等于收盘价的个股"
+            )
         
         # 2. 换手率筛选
         result = filter_by_turnover(result, max_val=self.max_turnover)
@@ -183,4 +188,5 @@ class RuleSmallCapLimitUp(BaseRule):
                 "options": ["创业板", "科创板", "北交所"]
             },
             "exclude_st": {"label": "排除ST", "value": self.exclude_st, "type": "bool"},
+            "exclude_one_word": {"label": "排除一字板", "value": self.exclude_one_word, "type": "bool"},
         }

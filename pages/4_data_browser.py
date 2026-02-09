@@ -12,6 +12,7 @@ import os
 sys.path.insert(0, '.')
 from services import DataSyncService, StockService
 from components.charts import render_chart, create_kline_chart
+from components.stock_details import show_stock_details
 
 # 页面配置
 st.set_page_config(page_title="数据浏览器 - TS-Share", page_icon="📁", layout="wide")
@@ -228,9 +229,12 @@ else:
         # 统计指标
         latest = df_history.iloc[-1]
         cols = st.columns(5)
-        cols[0].metric("最新收盘", f"{latest['收盘']:.2f}")
-        cols[1].metric("涨跌幅", f"{latest['涨跌幅']:.2f}%")
-        cols[2].metric("MA5", f"{latest['ma5']:.2f}" if 'ma5' in latest and pd.notnull(latest['ma5']) else "N/A")
+        # 增加 AI 诊断按钮
+        if cols[0].button("🔬 深度 AI 诊断", key=f"ai_diag_{search_code}", use_container_width=True):
+            st.session_state.pending_details = (search_code, stock_service.get_stock_name(search_code))
+
+        cols[1].metric("最新收盘", f"{latest['收盘']:.2f}")
+        cols[2].metric("涨跌幅", f"{latest['涨跌幅']:.2f}%")
         cols[3].metric("最新成交", f"{int(latest['成交量']):,}")
         cols[4].metric("VMA5", f"{int(latest['vma5']):,}" if 'vma5' in latest and pd.notnull(latest['vma5']) else "N/A")
         
@@ -271,5 +275,14 @@ else:
         st.download_button(label=f"📥 导出 {search_code} 历史数据 CSV", data=csv, file_name=f"stock_{search_code}_history.csv", mime="text/csv")
 
 # ========== 底部信息 ==========
+# ### 页面底部：处理待触发的弹窗 ###
+if 'pending_details' not in st.session_state:
+    st.session_state.pending_details = None
+
+if st.session_state.pending_details:
+    code, name = st.session_state.pending_details
+    st.session_state.pending_details = None # 清除信号
+    show_stock_details(code, name, stock_service)
+
 st.markdown("---")
 st.caption(f"💡 数据源: Tushare Pro | 数据库文件: {sync_service.db_path}")
