@@ -147,7 +147,7 @@ def show_stock_details(code, name):
             if toggle_collection(code, name, selected_rule):
                 st.rerun()
 
-    tab1, tab2, tab3 = st.tabs(["📈 K线走势", "📊 财务指标", "💰 资金流向"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 K线走势", "📊 财务指标", "💰 资金流向", "📢 重要公告"])
 
     ts_code = stock_service._to_ts_code(code)
 
@@ -229,6 +229,37 @@ def show_stock_details(code, name):
             2. **网络超时**：API 请求失败。
             3. **数据未发布**：即使回溯 5 天也未找到数据。
             """)
+
+    with tab4:
+        st.markdown("#### 📢 最近 30 天重要新闻与公告")
+        with st.spinner("获取数据中..."):
+            df_news = stock_service.get_stock_news(ts_code, days=30)
+        
+        if df_news is not None and not df_news.empty:
+            for _, row in df_news.iterrows():
+                with st.container():
+                    # 标题与日期
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        st.markdown(f"**{row.get('title', '无标题')}**")
+                    with col2:
+                        st.caption(f"📅 {row.get('ann_date', 'N/A')}")
+                    
+                    # 来源与链接
+                    source = row.get('ann_type', '互联网')
+                    url = row.get('url', '#')
+                    
+                    c1, c2 = st.columns([4, 1])
+                    with c1:
+                        st.caption(f"来源: {source}")
+                    with c2:
+                        if url != '#':
+                            st.markdown(f"[🔗 查看详情]({url})")
+                    
+                    st.divider()
+            st.caption("提示：AI 助手可在后续分析中自动调取并阅读新闻正文")
+        else:
+            st.info("💡 最近 30 天暂无重要公告或权限受限")
 
 # 先显示收藏夹
 st.markdown("---")

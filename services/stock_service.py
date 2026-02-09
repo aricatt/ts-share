@@ -5,6 +5,7 @@
 import os
 import sqlite3
 import tushare as ts
+import akshare as ak
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional, List
@@ -645,5 +646,49 @@ class StockService:
                 return df
         except Exception as e:
             print(f"获取每日指标失败 ({ts_code}, {trade_date}): {e}")
+            
+        return None
+
+    def get_stock_news(self, ts_code: str, days: int = 30) -> Optional[pd.DataFrame]:
+        """
+        获取个股最新新闻（带缓存）
+        使用 AkShare 获取东方财富新闻，并增加防封策略
+        """
+        import time
+        import random
+        
+        # 提取 6 位代码
+        symbol = ts_code.split('.')[0]
+        query_hash = f"ak_news_{days}d"
+        
+        # 1. 优先读缓存（缓存 24 小时，极大降低请求频率）
+        if self.analysis_cache:
+            cached = self.analysis_cache.get_news(ts_code, query_hash)
+            if cached is not None:
+                return pd.DataFrame(cached)
+
+        try:
+            # 2. 礼貌性延迟（如果是自动化脚本触发，这里能起到保护作用）
+            # 模拟真实用户行为，随机等待 0.5 - 1.5 秒
+            time.sleep(random.uniform(0.5, 1.5))
+            
+            # 3. 使用 AkShare 获取新闻
+            df = ak.stock_news_em(symbol=symbol)
+            
+            if df is not None and not df.empty:
+                df_res = df.rename(columns={
+                    '发布时间': 'ann_date',
+                    '新闻标题': 'title',
+                    '新闻来源': 'ann_type',
+                    '新闻链接': 'url'
+                })
+                
+                if self.analysis_cache:
+                    # 缓存 24 小时
+                    self.analysis_cache.set_news(ts_code, query_hash, df_res.to_dict('records'), ttl_hours=24)
+                return df_res
+        except Exception as e:
+            # 如果被封或网络问题，返回 None 但不崩溃
+            print(f"⚠️ AkShare 获取新闻受限或失败 ({symbol}): {e}")
             
         return None
