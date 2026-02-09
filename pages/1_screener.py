@@ -134,7 +134,7 @@ def toggle_collection(code, name, rule_name):
     return False
 
 # 修订弹窗函数内容
-@st.dialog("股票 K 线预览", width="large")
+@st.dialog("股票详情", width="large")
 def show_stock_details(code, name):
     # 操作栏
     col1, col2 = st.columns([3, 1])
@@ -147,14 +147,88 @@ def show_stock_details(code, name):
             if toggle_collection(code, name, selected_rule):
                 st.rerun()
 
-    with st.spinner("获取历史行情中..."):
-        df_hist = stock_service.get_history(code, days=250)
-    
-    if df_hist is not None and not df_hist.empty:
-        kline_chart = create_kline_chart(df_hist, title=f"{name} - 最近一年走势")
-        render_chart(kline_chart, height=500)
-    else:
-        st.warning("暂无历史行情数据可供预览")
+    tab1, tab2, tab3 = st.tabs(["📈 K线走势", "📊 财务指标", "💰 资金流向"])
+
+    ts_code = stock_service._to_ts_code(code)
+
+    with tab1:
+        with st.spinner("获取历史行情中..."):
+            df_hist = stock_service.get_history(code, days=250)
+        
+        if df_hist is not None and not df_hist.empty:
+            kline_chart = create_kline_chart(df_hist, title=f"{name} - 最近一年走势")
+            render_chart(kline_chart, height=500)
+        else:
+            st.warning("暂无历史行情数据")
+
+    with tab2:
+        st.markdown("#### 财务关键指标")
+        with st.spinner("获取财务数据中..."):
+            df_fina = stock_service.get_fundamental(ts_code, 'fina_indicator')
+            
+        if df_fina is not None and not df_fina.empty:
+            # 选取一些关键字段展示
+            key_cols = {
+                'end_date': '报告期',
+                'eps': '每股收益',
+                'roe': '净资产收益率(%)',
+                'netprofit_margin': '销售净利率(%)',
+                'grossprofit_margin': '销售毛利率(%)',
+                'debt_to_assets': '资产负债率(%)',
+                'bps': '每股净资产',
+                'netprofit_yoy': '净利润增长率(%)',
+                'tr_yoy': '营收增长率(%)'
+            }
+            # 过滤存在的列
+            cols = [c for c in key_cols.keys() if c in df_fina.columns]
+            df_display = df_fina[cols].rename(columns=key_cols)
+            st.dataframe(df_display.head(10), use_container_width=True, hide_index=True)
+            st.caption("注：数据来源 Tushare，缓存于 analysis_cache.db")
+        else:
+            st.info("💡 未获取到财务数据（可能权限不足或获取失败）")
+
+    with tab3:
+        st.markdown("#### 最近资金流向")
+        with st.spinner("获取资金流向中..."):
+            # 获取最近一天的资金流（如果当天没收盘，接口会向前自动找最近的一个有数据的日子）
+            last_date = stock_service.get_last_trading_day()
+            df_money = stock_service.get_money_flow_cached(ts_code, last_date)
+            
+        if df_money is not None and not df_money.empty:
+            # 获取实际的数据日期（可能因为还没收盘，展示的是前一天的）
+            actual_date = df_money['_actual_date'].iloc[0] if '_actual_date' in df_money.columns else "未知"
+            st.info(f"📅 数据日期: {actual_date} (注：当日资金流通常在收盘后 18:00 左右发布)")
+            
+            # 展示资金流详情
+            money_cols = {
+                'buy_sm_amount': '小单买入',
+                'sell_sm_amount': '小单卖出',
+                'buy_md_amount': '中单买入',
+                'sell_md_amount': '中单卖出',
+                'buy_lg_amount': '大单买入',
+                'sell_lg_amount': '大单卖出',
+                'buy_elg_amount': '特大单买入',
+                'sell_elg_amount': '特大单卖出',
+                'net_mf_amount': '净流入额'
+            }
+            cols = [c for c in money_cols.keys() if c in df_money.columns]
+            df_display = df_money[cols].rename(columns=money_cols).T
+            df_display.columns = ['金额 (万元)']
+            
+            # 简单着色处理
+            def highlight_net(val):
+                color = 'red' if val > 0 else 'green'
+                return f'color: {color}; font-weight: bold'
+            
+            st.table(df_display)
+        else:
+            st.warning("⚠️ 未能获取到资金流向数据")
+            st.info("""
+            **可能原因：**
+            1. **权限不足**：Tushare 资金流接口通常需要 2000 积分。
+            2. **网络超时**：API 请求失败。
+            3. **数据未发布**：即使回溯 5 天也未找到数据。
+            """)
 
 # 先显示收藏夹
 st.markdown("---")

@@ -246,6 +246,8 @@ with quick_cols[2]:
 st.markdown("---")
 st.subheader("💾 缓存管理")
 
+# 1. 通用文件缓存
+st.markdown("#### 📄 通用文件缓存")
 cache_path = CACHE_DIR
 if os.path.exists(cache_path):
     cache_files = [f for f in os.listdir(cache_path) if os.path.isfile(os.path.join(cache_path, f))]
@@ -258,12 +260,36 @@ if os.path.exists(cache_path):
     with col2:
         st.metric("缓存大小", f"{cache_size_mb:.2f} MB")
     
-    if st.button("🗑️ 清空缓存", type="secondary"):
+    if st.button("🗑️ 清空文件缓存", type="secondary", key="clear_file_cache"):
         if cache_service.clear_all():
-            st.success("✅ 缓存已清空")
+            st.success("✅ 文件缓存已清空")
             st.rerun()
 else:
-    st.info("📭 暂无缓存文件")
+    st.info("📭 暂无文件缓存")
+
+# 2. 分析数据缓存 (独立数据库)
+st.markdown("#### 🧪 分析数据缓存 (需 Tushare 积分)")
+from services import AnalysisCacheService
+analysis_cache = AnalysisCacheService()
+stats = analysis_cache.get_stats()
+
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    st.metric("基本面记录", stats.get("fundamental_cache", 0))
+with c2:
+    st.metric("资金流记录", stats.get("money_flow_cache", 0))
+with c4:
+    st.metric("缓存库大小", f"{stats.get('db_size_mb', 0)} MB")
+
+if st.button("🗑️ 清空分析缓存", type="secondary", key="clear_analysis_cache"):
+    if analysis_cache.clear_all():
+        st.success("✅ 分析缓存数据库已重置")
+        st.rerun()
+
+if st.button("🧹 清除已过期记录", key="clear_expired_cache"):
+    count = analysis_cache.clear_expired()
+    st.success(f"✅ 已清除 {count} 条过期记录")
+    st.rerun()
 
 # ========== 系统信息 ==========
 st.markdown("---")

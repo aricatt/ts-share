@@ -9,6 +9,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional, List
 from .cache_service import CacheService
+from .analysis_cache_service import AnalysisCacheService, CacheType
 from config import TUSHARE_TOKEN, MARKET_CAP_UNIT
 
 
@@ -22,6 +23,7 @@ class StockService:
     def __init__(self, use_cache: bool = True, data_dir: str = "data"):
         self.use_cache = use_cache
         self.cache = CacheService() if use_cache else None
+        self.analysis_cache = AnalysisCacheService(data_dir=data_dir) if use_cache else None
         self.data_dir = data_dir
         self.db_path = os.path.join(data_dir, "stocks.db")
         
@@ -551,3 +553,97 @@ class StockService:
             (code, rule_name)
         )
         return not df.empty
+
+    # ==================== 分析数据 (带独立缓存) ====================
+
+    def get_fundamental(self, ts_code: str, data_type: str = 'fina_indicator') -> Optional[pd.DataFrame]:
+        """
+        获取基本面数据（带缓存）
+        data_type: fina_indicator(财务指标), income(利润表), balancesheet(资产负债表), cashflow(现金流量表)
+        """
+        if self.analysis_cache:
+            cached = self.analysis_cache.get_fundamental(ts_code, data_type)
+            if cached is not None:
+                return pd.DataFrame(cached)
+
+        # 从 API 获取
+        try:
+            if data_type == 'fina_indicator':
+                df = self.pro.fina_indicator(ts_code=ts_code)
+            elif data_type == 'income':
+                df = self.pro.income(ts_code=ts_code)
+            elif data_type == 'balancesheet':
+                df = self.pro.balancesheet(ts_code=ts_code)
+            elif data_type == 'cashflow':
+                df = self.pro.cashflow(ts_code=ts_code)
+            else:
+                return None
+
+            if df is not None and not df.empty:
+                if self.analysis_cache:
+                    # 存储为 dict 列表
+                    self.analysis_cache.set_fundamental(ts_code, data_type, df.to_dict('records'))
+                return df
+        except Exception as e:
+            print(f"获取基本面数据失败 ({ts_code}, {data_type}): {e}")
+        
+        return None
+
+    def get_money_flow_cached(self, ts_code: str, trade_date: str, max_retries: int = 5) -> Optional[pd.DataFrame]:
+        """
+        获取资金流向数据（带缓存）
+        
+        如果指定日期没有数据（如交易日尚未收盘），会尝试向前回溯获取最近有数据的一天。
+        """
+        current_date = trade_date
+        
+        # 循环回溯，直到找到数据或达到最大尝试次数
+        for i in range(max_retries):
+            # 1. 查缓存
+            if self.analysis_cache:
+                cached = self.analysis_cache.get_money_flow(ts_code, current_date)
+                if cached is not None:
+                    df = pd.DataFrame(cached)
+                    # 在结果中注入实际数据的日期，方便 UI 展示
+                    df['_actual_date'] = current_date
+                    return df
+
+            # 2. 查 API
+            try:
+                df = self.pro.moneyflow(ts_code=ts_code, trade_date=current_date)
+                if df is not None and not df.empty:
+                    if self.analysis_cache:
+                        self.analysis_cache.set_money_flow(ts_code, current_date, df.to_dict('records'))
+                    df['_actual_date'] = current_date
+                    return df
+            except Exception as e:
+                # 检查是否是积分不足错误
+                error_msg = str(e)
+                if "权限" in error_msg or "积分" in error_msg or "40001" in error_msg:
+                    print(f"❌ Tushare 积分不足，无法获取资金流向: {e}")
+                    return None
+                print(f"⚠️ 获取 {current_date} 资金流失败: {e}")
+
+            # 3. 没找到，向前推一天再试
+            dt = datetime.strptime(current_date, "%Y%m%d")
+            current_date = (dt - timedelta(days=1)).strftime("%Y%m%d")
+            
+        return None
+
+    def get_daily_basic_cached(self, ts_code: str, trade_date: str) -> Optional[pd.DataFrame]:
+        """获取每日指标（PE/PB等，带缓存）"""
+        if self.analysis_cache:
+            cached = self.analysis_cache.get_daily_basic(ts_code, trade_date)
+            if cached is not None:
+                return pd.DataFrame(cached)
+
+        try:
+            df = self.pro.daily_basic(ts_code=ts_code, trade_date=trade_date)
+            if df is not None and not df.empty:
+                if self.analysis_cache:
+                    self.analysis_cache.set_daily_basic(ts_code, trade_date, df.to_dict('records'))
+                return df
+        except Exception as e:
+            print(f"获取每日指标失败 ({ts_code}, {trade_date}): {e}")
+            
+        return None
