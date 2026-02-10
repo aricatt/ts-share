@@ -151,11 +151,13 @@ def show_stock_details(code: str, name: str, stock_service: StockService, rule_n
             with st.status("🧠 投研研讨会火热进行中...", expanded=True) as status:
                 def on_msg_received(sender, content):
                     import time
-                    icon = "⚙️" if "系统" in sender else ("👨‍🏫" if "Analyst" in sender else ("⚖️" if "Risk" in sender else "�️"))
+                    # 使用 Streamlit 内置的 'assistant' 和 'user' 图标
+                    # 避免在部分环境下因为 emoji 或路径解析导致的 avatar 加载失败
+                    role = "assistant" if ("Analyst" in sender or "Risk" in sender or "系统" in sender) else "user"
                     with log_area:
-                        with st.chat_message("assistant" if ("Analyst" in sender or "Risk" in sender) else "user", avatar=icon):
+                        with st.chat_message(role):
                             st.markdown(f"**{sender}**: {content}")
-                    time.sleep(0.5)
+                    time.sleep(0.1)
                 try:
                     report = StockAnalystAgent(stock_service).analyze_stock(code, message_callback=on_msg_received)
                     stock_service.analysis_cache.save_ai_analysis(ts_code, report, LLM_CONFIG['config_list'][0].get('model', 'Unknown'))
@@ -174,11 +176,11 @@ def show_stock_details(code: str, name: str, stock_service: StockService, rule_n
         with chat_container:
             if not st.session_state[chat_key]: st.info(f"关于 {name} ({code})，您想了解什么？")
             for msg in st.session_state[chat_key]:
-                with st.chat_message(msg["role"], avatar="👨‍🏫" if msg["role"] == "assistant" else "👤"): st.markdown(msg["content"])
+                with st.chat_message(msg["role"]): st.markdown(msg["content"])
         
         if prompt := st.chat_input(f"询问关于 {name} 的问题...", key=f"chat_input_{code}"):
             with chat_container:
-                with st.chat_message("user", avatar="👤"): st.markdown(prompt)
+                with st.chat_message("user"): st.markdown(prompt)
             st.session_state[chat_key].append({"role": "user", "content": prompt})
             
             with chat_container:
@@ -198,7 +200,7 @@ def show_stock_details(code: str, name: str, stock_service: StockService, rule_n
                         status.update(label="✅ 思考完成", state="complete", expanded=False)
                         
                         # 在对话流中展示最终回答
-                        with st.chat_message("assistant", avatar="👨‍🏫"):
+                        with st.chat_message("assistant"):
                             st.markdown(response)
                         st.session_state[chat_key].append({"role": "assistant", "content": response})
                         st.rerun()

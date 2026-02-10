@@ -422,7 +422,7 @@ class StockService:
         
         where_clause = ' AND '.join(conditions) if conditions else '1=1'
         sql = f'''
-            SELECT b.名称, d.*, b.行业, b.地区
+            SELECT b.名称, d.*, b.行业, b.区域
             FROM daily_data d
             LEFT JOIN stock_basic b ON d.代码 = b.代码
             WHERE {where_clause.replace('日期', 'd.日期').replace('涨跌幅', 'd.涨跌幅').replace('PE', 'd.PE').replace('流通市值', 'd.流通市值').replace('换手率', 'd.换手率')}
@@ -457,13 +457,26 @@ class StockService:
         return df.iloc[0]['is_open'] == 1
     
     def get_last_trading_day(self) -> str:
-        """获取最近交易日"""
+        """获取最近交易日（基于交易日历）"""
         today = datetime.now()
-        for i in range(10):
+        for i in range(15):
             date = (today - timedelta(days=i)).strftime("%Y%m%d")
             if self.is_trading_day(date):
                 return date
         return today.strftime("%Y%m%d")
+    
+    def get_latest_data_date(self) -> str:
+        """获取数据库中存有的最新数据日期"""
+        if not self._db_exists():
+            return datetime.now().strftime("%Y%m%d")
+            
+        sql = "SELECT MAX(日期) as max_date FROM daily_data"
+        df = self._query_db(sql)
+        if not df.empty and df.iloc[0]['max_date']:
+            return str(df.iloc[0]['max_date'])
+        
+        # 兜底：获取理论上的最近交易日
+        return self.get_last_trading_day()
     
     # ==================== 数据源路由 ====================
     
@@ -525,7 +538,7 @@ class StockService:
         
         # 2. 获取目标日期的完整指标
         sql_data = f'''
-            SELECT b.名称, d.*, b.行业, b.地区
+            SELECT b.名称, d.*, b.行业, b.区域
             FROM daily_data d
             LEFT JOIN stock_basic b ON d.代码 = b.代码
             WHERE d.日期 = ? AND d.代码 IN ({codes_placeholder})

@@ -26,7 +26,12 @@ stock_service = StockService(use_cache=True)
 st.sidebar.header("🔍 筛选参数")
 
 # 日期选择
-default_date = datetime.now()
+latest_data_date = stock_service.get_latest_data_date()
+try:
+    default_date = datetime.strptime(latest_data_date, "%Y%m%d")
+except:
+    default_date = datetime.now()
+
 selected_date = st.sidebar.date_input("选择日期", value=default_date)
 date_str = selected_date.strftime("%Y%m%d")
 
