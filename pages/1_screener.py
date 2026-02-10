@@ -250,4 +250,4 @@ st.sidebar.markdown("""
 if st.session_state.pending_details:
     code, name = st.session_state.pending_details
     st.session_state.pending_details = None # 清除信号，防止循环
-    show_stock_details(code, name, stock_service)
+    show_stock_details(code, name, stock_service, selected_rule)

@@ -599,6 +599,24 @@ class StockService:
         )
         return not df.empty
 
+    def get_company_info(self, ts_code: str) -> Optional[pd.DataFrame]:
+        """获取上市公司基本信息（简介、主营业务等）"""
+        if self.analysis_cache:
+            cached = self.analysis_cache.get_fundamental(ts_code, 'company_info')
+            if cached is not None:
+                return pd.DataFrame(cached)
+
+        try:
+            df = self.pro.stock_company(ts_code=ts_code, fields='ts_code,chairman,manager,secretary,reg_capital,setup_date,province,city,introduction,main_business,business_scope')
+            if df is not None and not df.empty:
+                if self.analysis_cache:
+                    self.analysis_cache.set_fundamental(ts_code, 'company_info', df.to_dict('records'))
+                return df
+        except Exception as e:
+            print(f"获取上市公司信息失败 ({ts_code}): {e}")
+        
+        return None
+
     # ==================== 分析数据 (带独立缓存) ====================
 
     def get_fundamental(self, ts_code: str, data_type: str = 'fina_indicator') -> Optional[pd.DataFrame]:
