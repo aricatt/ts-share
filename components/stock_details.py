@@ -25,17 +25,31 @@ def show_stock_details(code: str, name: str, stock_service: StockService, rule_n
 
     with col2:
         if rule_name:
-            is_collected = stock_service.is_collected(code, rule_name)
+            collect_info = stock_service.get_collect_info(code, rule_name)
+            is_collected = collect_info is not None
+            
+            # 备注输入框
+            default_remark = collect_info.get('备注', '') if is_collected and collect_info.get('备注') else ""
+            remark = st.text_input("📝 收藏备注", value=default_remark, placeholder="输入收藏理由...", key=f"remark_{code}")
+            
             btn_label = "⭐ 取消收藏" if is_collected else "➕ 加入收藏"
-            if st.button(btn_label, use_container_width=True, type="primary" if not is_collected else "secondary"):
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button(btn_label, use_container_width=True, type="primary" if not is_collected else "secondary"):
+                    if is_collected:
+                        if stock_service.remove_collected_stock(code, rule_name):
+                            st.toast(f"已从【{rule_name}】中移除")
+                            st.rerun()
+                    else:
+                        if stock_service.collect_stock(code, name, rule_name, price=current_price, remark=remark):
+                            st.toast(f"已保存到【{rule_name}】收藏")
+                            st.rerun()
+            with c2:
                 if is_collected:
-                    if stock_service.remove_collected_stock(code, rule_name):
-                        st.toast(f"已从【{rule_name}】中移除")
-                        st.rerun()
-                else:
-                    if stock_service.collect_stock(code, name, rule_name, price=current_price):
-                        st.toast(f"已保存到【{rule_name}】收藏")
-                        st.rerun()
+                    if st.button("💾 更新备注", use_container_width=True):
+                        if stock_service.collect_stock(code, name, rule_name, price=collect_info.get('收藏价格'), remark=remark):
+                            st.toast("备注已更新")
+                            st.rerun()
 
     # --- 标签页布局 ---
     tab1, tab_profile, tab2, tab3, tab4, tab5, tab6 = st.tabs([

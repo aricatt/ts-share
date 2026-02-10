@@ -129,7 +129,7 @@ def display_collections(rule_name):
             if '涨跌幅' in disp_fav.columns:
                 disp_fav['当日涨幅'] = disp_fav['涨跌幅'].astype(float).round(2).astype(str) + '%'
             
-            show_cols = ['代码', '名称', '收藏价格', '当前价格', '盈亏(%)', '当日涨幅', '收藏日期']
+            show_cols = ['代码', '名称', '收藏价格', '当前价格', '盈亏(%)', '当日涨幅', '备注', '收藏日期']
             show_cols = [c for c in show_cols if c in disp_fav.columns]
             
             # 使用 unique key 避免冲突

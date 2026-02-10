@@ -684,6 +684,16 @@ class StockService:
         )
         return not df.empty
 
+    def get_collect_info(self, code: str, rule_name: str) -> Optional[dict]:
+        """获取个股在特定策略下的收藏备注等信息"""
+        df = self._query_db(
+            "SELECT * FROM collected_stocks WHERE 代码 = ? AND 策略名称 = ?",
+            (code, rule_name)
+        )
+        if not df.empty:
+            return df.iloc[0].to_dict()
+        return None
+
     def get_company_info(self, ts_code: str) -> Optional[pd.DataFrame]:
         """获取上市公司基本信息（简介、主营业务等）"""
         if self.analysis_cache:
