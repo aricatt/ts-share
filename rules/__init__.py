@@ -4,11 +4,13 @@
 from .base import BaseRule, StepTracker, StepResult
 from .rule_small_cap_limit_up import RuleSmallCapLimitUp
 from .rule_dragon_pullback import RuleDragonPullback
+from .rule_industry_theme import RuleIndustryTheme
 
 # 策略注册表
 RULE_REGISTRY = {
     "小盘涨停异动": RuleSmallCapLimitUp,
     "龙回头": RuleDragonPullback,
+    "行业板块筛选": RuleIndustryTheme,
 }
 
 def get_rule(name: str) -> BaseRule:

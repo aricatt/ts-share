@@ -52,11 +52,18 @@ class StockService:
                     代码 TEXT NOT NULL,
                     名称 TEXT,
                     收藏日期 TEXT NOT NULL,
+                    收藏价格 REAL,
                     策略名称 TEXT NOT NULL,
                     备注 TEXT,
                     UNIQUE(代码, 策略名称)
                 )
             ''')
+            # 检查字段是否存在（针对旧数据库升级）
+            cursor = conn.execute("PRAGMA table_info(collected_stocks)")
+            columns = [info[1] for info in cursor.fetchall()]
+            if '收藏价格' not in columns:
+                conn.execute("ALTER TABLE collected_stocks ADD COLUMN 收藏价格 REAL")
+                
             conn.execute('CREATE INDEX IF NOT EXISTS idx_collect_code ON collected_stocks (代码)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_collect_strategy ON collected_stocks (策略名称)')
             conn.commit()
@@ -90,6 +97,13 @@ class StockService:
         except Exception as e:
             print(f"获取股票列表失败: {e}")
             return pd.DataFrame()
+
+    def get_industry_list(self) -> List[str]:
+        """获取所有行业列表"""
+        df = self.get_stock_list()
+        if df.empty:
+            return []
+        return sorted(df['industry'].dropna().unique().tolist())
     
     def search_stocks(self, query: str, limit: int = 10) -> pd.DataFrame:
         """
@@ -249,7 +263,7 @@ class StockService:
         # 1. 从本地数据库获取
         if self._db_exists():
             sql = '''
-                SELECT b.名称, d.*, b.行业, b.地区, b.上市日期
+                SELECT b.名称, d.*, b.行业, b.区域, b.上市日期
                 FROM daily_data d
                 LEFT JOIN stock_basic b ON d.代码 = b.代码
                 WHERE d.代码 = ? 
@@ -478,7 +492,7 @@ class StockService:
             return pd.DataFrame()
             
         sql = '''
-            SELECT b.名称, d.*, b.行业, b.市场
+            SELECT b.名称, d.*, b.行业, b.市场, b.主营业务, b.概念
             FROM daily_data d
             LEFT JOIN stock_basic b ON d.代码 = b.代码
             WHERE d.日期 = ?
@@ -522,7 +536,7 @@ class StockService:
         return df
     # ==================== 股票收藏控制 ====================
     
-    def collect_stock(self, code: str, name: str, rule_name: str, remark: str = "") -> bool:
+    def collect_stock(self, code: str, name: str, rule_name: str, price: float = None, remark: str = "") -> bool:
         """收藏股票"""
         if not self._db_exists():
             return False
@@ -530,10 +544,20 @@ class StockService:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # 如果没传价格，尝试获取最新价
+                if price is None:
+                    try:
+                        ts_code = self._to_ts_code(code)
+                        df = self.pro.daily(ts_code=ts_code, limit=1)
+                        if not df.empty:
+                            price = float(df.iloc[0]['close'])
+                    except:
+                        pass
+
                 conn.execute('''
-                    INSERT OR REPLACE INTO collected_stocks (代码, 名称, 收藏日期, 策略名称, 备注)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (code, name, now, rule_name, remark))
+                    INSERT OR REPLACE INTO collected_stocks (代码, 名称, 收藏日期, 收藏价格, 策略名称, 备注)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (code, name, now, price, rule_name, remark))
                 conn.commit()
                 return True
         except Exception as e:
@@ -564,6 +588,12 @@ class StockService:
         
         if df_fav.empty:
             return df_fav
+        
+        # 检查是否有缺失价格记录，如有则尝试补齐
+        if '收藏价格' in df_fav.columns and df_fav['收藏价格'].isnull().any():
+            self._backfill_missing_prices()
+            # 重新查询以获取补齐后的数据
+            df_fav = self._query_db(sql, tuple(params))
             
         # 尝试关联最新的行情数据（如果有）
         try:
@@ -590,6 +620,48 @@ class StockService:
             pass
             
         return df_fav
+
+    def _backfill_missing_prices(self):
+        """补齐缺失的收藏价格"""
+        sql_missing = "SELECT id, 代码, 收藏日期 FROM collected_stocks WHERE 收藏价格 IS NULL"
+        df_missing = self._query_db(sql_missing)
+        
+        if df_missing.empty:
+            return
+            
+        updated_count = 0
+        with sqlite3.connect(self.db_path) as conn:
+            for _, row in df_missing.iterrows():
+                rec_id = row['id']
+                code = row['代码']
+                # 转换日期格式：2026-02-10 10:01:09 -> 20260210
+                date_str = row['收藏日期'][:10].replace('-', '')
+                
+                price = None
+                # 1. 尝试从本地数据库找当天的收盘价
+                sql_price = "SELECT 收盘 FROM daily_data WHERE 代码 = ? AND 日期 = ?"
+                df_p = self._query_db(sql_price, (code, date_str))
+                if not df_p.empty:
+                    price = float(df_p.iloc[0]['收盘'])
+                
+                # 2. 如果本地没有，尝试请求 API（仅限单日数据）
+                if price is None:
+                    try:
+                        ts_code = self._to_ts_code(code)
+                        df_api = self.pro.daily(ts_code=ts_code, start_date=date_str, end_date=date_str)
+                        if not df_api.empty:
+                            price = float(df_api.iloc[0]['close'])
+                    except:
+                        pass
+                
+                # 3. 更新数据库
+                if price is not None:
+                    conn.execute("UPDATE collected_stocks SET 收藏价格 = ? WHERE id = ?", (price, rec_id))
+                    updated_count += 1
+            
+            if updated_count > 0:
+                conn.commit()
+                print(f"成功补齐 {updated_count} 条收藏价格记录")
 
     def is_collected(self, code: str, rule_name: str) -> bool:
         """检查是否已收藏"""
@@ -787,3 +859,78 @@ class StockService:
             "money_flow": money_data,
             "latest_news": news_list[:10] # 取最新的 10 条
         }
+
+    def get_industry_ranking(self, code: str) -> Optional[dict]:
+        """
+        获取个股在所属行业中的排名信息
+        基于本地数据库最新的一天数据进行统计
+        """
+        if not self._db_exists():
+            return None
+            
+        try:
+            # 1. 获取个股所属行业
+            symbol_clean = code.split('.')[0]
+            sql_industry = "SELECT 名称, 行业 FROM stock_basic WHERE 代码 = ? LIMIT 1"
+            df_info = self._query_db(sql_industry, (symbol_clean,))
+            if df_info.empty or not df_info.iloc[0]['行业']:
+                return None
+            
+            industry = df_info.iloc[0]['行业']
+            
+            # 2. 获取数据库中最新的交易日期
+            sql_date = "SELECT MAX(日期) as max_date FROM daily_data"
+            df_date = self._query_db(sql_date)
+            if df_date.empty or not df_date.iloc[0]['max_date']:
+                return None
+            
+            latest_date = df_date.iloc[0]['max_date']
+            
+            # 3. 统计同行业所有个股的行情数据
+            sql_peers = f'''
+                SELECT d.代码, b.名称, d.收盘, d.涨跌幅, d.总市值, d.PE, d.换手率
+                FROM daily_data d
+                JOIN stock_basic b ON d.代码 = b.代码
+                WHERE b.行业 = ? AND d.日期 = ?
+                ORDER BY d.总市值 DESC
+            '''
+            df_peers = self._query_db(sql_peers, (industry, latest_date))
+            
+            if df_peers.empty:
+                return None
+            
+            # 4. 计算指标排名
+            total_count = len(df_peers)
+            # 市值排名 (已由 SQL ORDER BY 总市值 DESC 保证顺序)
+            df_peers['市值排名'] = range(1, total_count + 1)
+            
+            # 5. 提取个股排名
+            my_row = df_peers[df_peers['代码'] == symbol_clean]
+            if my_row.empty:
+                return None
+            
+            my_info = my_row.iloc[0]
+            
+            # 涨幅排名
+            df_peers_sorted_chg = df_peers.sort_values('涨跌幅', ascending=False)
+            df_peers_sorted_chg['涨幅排名'] = range(1, total_count + 1)
+            my_chg_info = df_peers_sorted_chg[df_peers_sorted_chg['代码'] == symbol_clean].iloc[0]
+            
+            # 6. 找出真正的行业龙头（市值前三）
+            leaders = df_peers.head(3).to_dict('records')
+            
+            return {
+                "industry": industry,
+                "total_count": total_count,
+                "date": latest_date,
+                "rank_market_cap": int(my_info['市值排名']),
+                "rank_pct_chg": int(my_chg_info['涨幅排名']),
+                "market_cap": float(my_info['总市值']),
+                "leaders": leaders,
+                "avg_pct_chg": float(df_peers['涨跌幅'].mean()),
+                "industry_top_pct": float(df_peers['涨跌幅'].max())
+            }
+            
+        except Exception as e:
+            print(f"获取行业排名失败: {e}")
+            return None

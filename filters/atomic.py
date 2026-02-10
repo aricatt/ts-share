@@ -188,3 +188,19 @@ def filter_by_not_one_word(df: pd.DataFrame) -> pd.DataFrame:
     if open_col and close_col:
         return df[df[open_col] != df[close_col]]
     return df
+
+def filter_by_industry(df: pd.DataFrame, industries: Optional[List[str]] = None) -> pd.DataFrame:
+    """
+    按行业名称过滤
+    
+    Args:
+        df: 股票数据 DataFrame，需包含 '行业' 列
+        industries: 需要包含的行业列表
+    
+    Returns:
+        过滤后的 DataFrame
+    """
+    if not industries:
+        return df
+    
+    return df[df['行业'].isin(industries)]

@@ -42,8 +42,13 @@ st.sidebar.caption(f"📝 {rule.description}")
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 参数调整")
 
-# 根据策略动态显示参数
+# 特殊处理：行业列表动态注入
 params = rule.get_params()
+if selected_rule == "行业板块筛选":
+    industry_list = stock_service.get_industry_list()
+    if "industries" in params:
+        params["industries"]["options"] = industry_list
+
 adjusted_params = {}
 
 for key, config in params.items():
@@ -51,7 +56,7 @@ for key, config in params.items():
         adjusted_params[key] = st.sidebar.slider(
             config['label'],
             min_value=float(config.get('min', 0.0)),
-            max_value=float(config.get('max', 100.0)),
+            max_value=float(config.get('max', 2000.0)), # 扩大范围
             value=float(config['value']),
             step=float(config.get('step', 0.1)),
             key=f"param_{key}"
@@ -69,11 +74,18 @@ for key, config in params.items():
             index=config['options'].index(config['value']) if config['value'] in config['options'] else 0,
             key=f"param_{key}"
         )
-    elif config['type'] == 'list':
+    elif config['type'] in ['list', 'multiselect']:
         adjusted_params[key] = st.sidebar.multiselect(
             config['label'],
             options=config.get('options', config['value']),
             default=config['value'],
+            key=f"param_{key}"
+        )
+    elif config['type'] == 'text':
+        adjusted_params[key] = st.sidebar.text_input(
+            config['label'],
+            value=config['value'],
+            placeholder=config.get('placeholder', ""),
             key=f"param_{key}"
         )
 
@@ -98,12 +110,22 @@ def display_collections(rule_name):
         with st.expander(f"⭐ 我的收藏 - {rule_name} ({len(fav_df)} 只)", expanded=True):
             # 格式化展示数据
             disp_fav = fav_df.copy()
-            if '涨跌幅' in disp_fav.columns:
-                disp_fav['涨跌幅'] = disp_fav['涨跌幅'].astype(float).round(2).astype(str) + '%'
-            if '总市值' in disp_fav.columns:
-                disp_fav['市值(亿)'] = (disp_fav['总市值'] / 10000).round(2)
+            # 重命名列名以便展示
+            if '收盘' in disp_fav.columns:
+                disp_fav = disp_fav.rename(columns={'收盘': '当前价格'})
             
-            show_cols = [c for c in ['代码', '名称', '涨跌幅', '市值(亿)', '行业', '收藏日期'] if c in disp_fav.columns]
+            # 计算盈亏 (确保数据类型为数值)
+            if '当前价格' in disp_fav.columns and '收藏价格' in disp_fav.columns:
+                # 强制转换为数值类型，无法转换的变为 NaN
+                cur_p = pd.to_numeric(disp_fav['当前价格'], errors='coerce')
+                fav_p = pd.to_numeric(disp_fav['收藏价格'], errors='coerce')
+                disp_fav['盈亏(%)'] = ((cur_p / fav_p - 1) * 100).round(2)
+            
+            if '涨跌幅' in disp_fav.columns:
+                disp_fav['当日涨幅'] = disp_fav['涨跌幅'].astype(float).round(2).astype(str) + '%'
+            
+            show_cols = ['代码', '名称', '收藏价格', '当前价格', '盈亏(%)', '当日涨幅', '收藏日期']
+            show_cols = [c for c in show_cols if c in disp_fav.columns]
             
             # 使用 unique key 避免冲突
             fav_selected = st.dataframe(

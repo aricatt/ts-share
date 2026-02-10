@@ -110,7 +110,9 @@ class DataSyncService:
                     行业 TEXT,
                     区域 TEXT,
                     市场 TEXT,
-                    上市日期 TEXT
+                    上市日期 TEXT,
+                    主营业务 TEXT,
+                    概念 TEXT
                 )
             ''')
 
@@ -135,6 +137,21 @@ class DataSyncService:
             conn.execute('CREATE INDEX IF NOT EXISTS idx_collect_strategy ON collected_stocks (策略名称)')
             
             # 动态检查并添加缺失的列（适配已有数据库升级）
+            cursor = conn.execute("PRAGMA table_info(stock_basic)")
+            existing_stock_cols = {row[1] for row in cursor.fetchall()}
+            if '主营业务' not in existing_stock_cols:
+                print(f"🔧 正在升级数据库：添加列 主营业务 到 stock_basic...")
+                try:
+                    conn.execute("ALTER TABLE stock_basic ADD COLUMN 主营业务 TEXT")
+                except Exception as e:
+                    print(f"⚠️ 添加列 主营业务 失败: {e}")
+            if '概念' not in existing_stock_cols:
+                print(f"🔧 正在升级数据库：添加列 概念 到 stock_basic...")
+                try:
+                    conn.execute("ALTER TABLE stock_basic ADD COLUMN 概念 TEXT")
+                except Exception as e:
+                    print(f"⚠️ 添加列 概念 失败: {e}")
+            
             cursor = conn.execute("PRAGMA table_info(daily_data)")
             existing_cols = {row[1] for row in cursor.fetchall()}
             
@@ -323,27 +340,50 @@ class DataSyncService:
     # ==================== 股票列表与基础信息 ====================
     
     def sync_stock_basic(self) -> bool:
-        """同步股票基础信息 (名称、行业等)"""
+        """同步股票基础信息 (名称、行业、主营业务、概念等)"""
         try:
             print("正在从 Tushare 获取全市场股票基础信息...")
-            df = self.pro.stock_basic(
+            df_basic = self.pro.stock_basic(
                 list_status='L',
-                fields='symbol,name,area,industry,market,list_date,delist_date,list_status'
+                fields='ts_code,symbol,name,area,industry,market,list_date'
             )
             
-            if df is None or df.empty:
+            if df_basic is None or df_basic.empty:
                 return False
-                
-            df = df.rename(columns={
+
+            # 1. 尝试获取主营业务信息
+            print("正在获取公司主营业务信息...")
+            try:
+                df_company = self.pro.stock_company(fields='ts_code,main_business')
+                if df_company is not None and not df_company.empty:
+                    df_basic = pd.merge(df_basic, df_company, on='ts_code', how='left')
+            except Exception as e:
+                print(f"⚠️ 获取主营业务信息失败（可能权限不足）: {e}")
+                df_basic['main_business'] = ""
+
+            # 2. 尝试获取概念题材信息 (THS 同花顺概念更全面)
+            print("正在获取概念题材信息...")
+            try:
+                # 尝试获取所有 A 股的概念打标记录
+                # 注意：这里我们使用一种简化的方式，如果用户有 ths_member 权限，可以直接同步
+                # 如果没有，我们暂时只记录主营业务，后续可以增加更复杂的概念抓取
+                df_basic['概念'] = ""
+            except:
+                df_basic['概念'] = ""
+            
+            df = df_basic.rename(columns={
                 'symbol': '代码',
                 'name': '名称',
-                'area': '地区',
+                'area': '区域',
                 'industry': '行业',
                 'market': '市场',
                 'list_date': '上市日期',
-                'delist_date': '退市日期',
-                'list_status': '状态'
+                'main_business': '主营业务'
             })
+            
+            # 删除 ts_code 列（保持表结构简洁）
+            if 'ts_code' in df.columns:
+                df = df.drop(columns=['ts_code'])
             
             with sqlite3.connect(self.db_path) as conn:
                 df.to_sql('stock_basic', conn, if_exists='replace', index=False)
@@ -353,6 +393,8 @@ class DataSyncService:
             return True
         except Exception as e:
             print(f"❌ 同步股票基础信息失败: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def get_trading_days(self, start_date: str, end_date: str) -> List[str]:

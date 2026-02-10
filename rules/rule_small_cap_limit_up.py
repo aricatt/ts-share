@@ -44,7 +44,7 @@ class RuleSmallCapLimitUp(BaseRule):
         max_turnover: float = 10.0,
         max_market_cap: float = 100.0,  # 亿
         ma_period: int = 20,            # 均线周期
-        ma_dist_pct: float = 5.0,       # 偏离比例
+        ma_dist_pct: float = 1.0,       # 偏离比例
         exclude_exchanges: list = None,
         exclude_st: bool = True,
         exclude_one_word: bool = False, # 默认改为 False，方便用户看到所有涨停，包括一字
@@ -54,7 +54,7 @@ class RuleSmallCapLimitUp(BaseRule):
         self.max_market_cap = max_market_cap * MARKET_CAP_UNIT
         self.ma_period = int(ma_period)
         self.ma_dist_pct = ma_dist_pct
-        self.exclude_exchanges = exclude_exchanges or ["创业板", "科创板", "北交所"]
+        self.exclude_exchanges = exclude_exchanges or [ "科创板", "北交所"]
         self.exclude_st = exclude_st
         self.exclude_one_word = exclude_one_word
     
